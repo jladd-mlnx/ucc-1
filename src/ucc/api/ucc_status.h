@@ -1,7 +1,7 @@
 /**
  * @file ucc_status.h
  * @date 2020
- * @copyright Copyright (C) Mellanox Technologies Ltd. 2020.  ALL RIGHTS RESERVED.
+ * @copyright (c) 2020, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See file LICENSE for terms.
  */
@@ -39,6 +39,8 @@ typedef enum {
     UCC_ERR_NO_RESOURCE                 =   -5,
     UCC_ERR_NO_MESSAGE                  =   -6, /*!< General purpose return code without specific error */
     UCC_ERR_NOT_FOUND                   =   -7,
+    UCC_ERR_TIMED_OUT                   =   -8,
+    UCC_ERR_IO_ERROR                    =   -9,
     UCC_ERR_LAST                        = -100,
 } ucc_status_t;
 

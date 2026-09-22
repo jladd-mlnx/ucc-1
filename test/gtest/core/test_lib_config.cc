@@ -1,9 +1,10 @@
 /**
- * Copyright (C) Mellanox Technologies Ltd. 2020.  ALL RIGHTS RESERVED.
+ * Copyright (c) 2020, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * See file LICENSE for terms.
  */
 
-#include <common/test.h>
+#include <common/test_ucc.h>
+
 class test_lib_config : public ucc::test {
 };
 

@@ -1,0 +1,55 @@
+#!/usr/bin/groovy
+
+// Load Blossom GitHub library
+// This library provides functionality for interacting with GitHub
+// It is used to update the commit status and upload logs
+@Library('blossom-github-lib@master')
+
+// load pipeline functions
+// Requires pipeline-github-lib plugin to load library from github
+@Library('ci-demo')
+@Library('swx-jenkins-lib')  // provides the ciTriage helper for the CI triage trigger
+def matrix = new com.mellanox.cicd.Matrix()
+
+def githubHelper = null
+def pipelineOverviewUrl = ""
+
+import ipp.blossom.*
+if (params.githubData) {
+    withCredentials([usernamePassword(credentialsId: 'svcnbu-swx-hpcx-github-token', passwordVariable: 'GIT_PASSWORD', usernameVariable: 'GIT_USERNAME')]) {
+        githubHelper = GithubHelper.getInstance("${GIT_PASSWORD}", githubData)
+    }
+    pipelineOverviewUrl = "${env.BUILD_URL}/pipeline-overview/"
+    githubHelper.updateCommitStatus(pipelineOverviewUrl, "Test started", GitHubCommitState.PENDING, env.JOB_BASE_NAME)
+    currentBuild.description = githubHelper.getBuildDescription()
+}
+
+try {
+    matrix.main()
+} catch (Exception ex) {
+    currentBuild.result = 'FAILURE'
+    println ex
+    // On failure, kick off an automated CI triage investigation.
+    if (params.githubData) {
+        try {
+            // ciTriage (swx-jenkins-lib) POSTs to the agent on the flyweight
+            // executor. The endpoint comes from the 'ci-triage-ucc-url' secret
+            // text credential rather than being hardcoded here.
+            withCredentials([string(credentialsId: 'ci-triage-ucc-url', variable: 'CI_TRIAGE_URL')]) {
+                ciTriage(
+                    url:       env.CI_TRIAGE_URL,
+                    commitSha: githubHelper.getMergedSHA(),
+                    prNumber:  githubHelper.getPRNumber(),
+                    insecure:  true,   // the ingress wildcard CA isn't in the controller trust store
+                )
+            }
+        } catch (Exception triageEx) {
+            echo "CI triage trigger failed (non-fatal): ${triageEx}"
+        }
+    }
+    throw ex
+} finally {
+    if (params.githubData) {
+        githubHelper.updateCommitStatus(pipelineOverviewUrl, "Test completed", currentBuild.resultIsBetterOrEqualTo('SUCCESS') ? GitHubCommitState.SUCCESS : GitHubCommitState.FAILURE, env.JOB_BASE_NAME)
+    }
+}

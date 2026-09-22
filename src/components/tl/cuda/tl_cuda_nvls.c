@@ -1,0 +1,944 @@
+/**
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *
+ * See file LICENSE for terms.
+ */
+
+#include "tl_cuda_nvls.h"
+
+#include "tl_cuda.h"
+#include "tl_cuda_coll.h"
+#include "core/ucc_team.h"
+#include "utils/arch/cuda_def.h"
+#include "utils/ucc_math.h"
+
+#include <sys/syscall.h> // for pidfd_open and pidfd_getfd
+#include <sys/prctl.h>   // for prctl()
+#include <unistd.h>      // for close()
+#include <errno.h>       // for EPERM/EACCES
+#include <string.h>      // for strerror()
+
+/* RHEL 8 glibc headers (kernel 4.18) don't define pidfd syscall numbers */
+#ifndef SYS_pidfd_open
+#define SYS_pidfd_open 434
+#endif
+
+#ifndef SYS_pidfd_getfd
+#define SYS_pidfd_getfd 438
+#endif
+
+ucc_status_t ucc_tl_cuda_nvls_check_support(
+    ucc_tl_cuda_lib_t *lib, int device, int is_multinode)
+{
+    int          multicast_supported, fabric_supported;
+    ucc_status_t status;
+
+    status = CUDADRV_FUNC(cuDeviceGetAttribute(
+        &multicast_supported, CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, device));
+    if (status != UCC_OK) {
+        return UCC_ERR_NOT_SUPPORTED;
+    }
+
+    status = CUDADRV_FUNC(cuDeviceGetAttribute(
+        &fabric_supported,
+        CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED,
+        device));
+    if (status != UCC_OK) {
+        return UCC_ERR_NOT_SUPPORTED;
+    }
+
+    tl_debug(
+        lib,
+        "MULTICAST_SUPPORTED: %d, HANDLE_TYPE_FABRIC_SUPPORTED: %d\n",
+        multicast_supported,
+        fabric_supported);
+
+    if (!multicast_supported) {
+        tl_debug(lib, "multicast not supported on device %d", device);
+        return UCC_ERR_NOT_SUPPORTED;
+    }
+
+    if (is_multinode && !fabric_supported) {
+        tl_debug(lib, "fabric handle not supported on device %d", device);
+        return UCC_ERR_NOT_SUPPORTED;
+    }
+
+    return UCC_OK;
+}
+
+static ucc_status_t ucc_tl_cuda_nvls_get_granularity(
+    CUmulticastObjectProp *mc_prop, size_t *min_gran, size_t *gran)
+{
+    ucc_status_t status;
+
+    status = CUDADRV_FUNC(cuMulticastGetGranularity(
+        min_gran, mc_prop, CU_MULTICAST_GRANULARITY_MINIMUM));
+    if (status != UCC_OK) {
+        return UCC_ERR_NOT_SUPPORTED;
+    }
+
+    status = CUDADRV_FUNC(cuMulticastGetGranularity(
+        gran, mc_prop, CU_MULTICAST_GRANULARITY_RECOMMENDED));
+    if (status != UCC_OK) {
+        return UCC_ERR_NOT_SUPPORTED;
+    }
+
+    return UCC_OK;
+}
+
+static ucc_status_t ucc_tl_cuda_nvls_create_multicast_object_posix(
+    CUmulticastObjectProp *mc_prop, CUmemGenericAllocationHandle *mc_handle,
+    int *export_handle)
+{
+    ucc_status_t status;
+
+    status = CUDADRV_FUNC(cuMulticastCreate(mc_handle, mc_prop));
+    if (status != UCC_OK) {
+        return UCC_ERR_NOT_SUPPORTED;
+    }
+
+    // For POSIX file descriptors, CUDA API writes the fd to the memory pointed to by the first arg
+    // The API expects void* but will write an int-sized value
+    status = CUDADRV_FUNC(cuMemExportToShareableHandle(
+        (void *)export_handle, *mc_handle, mc_prop->handleTypes, 0));
+    if (status != UCC_OK) {
+        CUDADRV_FUNC(cuMemRelease(*mc_handle));
+        return status;
+    }
+
+    return UCC_OK;
+}
+
+static ucc_status_t ucc_tl_cuda_nvls_create_multicast_object_fabric(
+    CUmulticastObjectProp *mc_prop, CUmemGenericAllocationHandle *mc_handle,
+    CUmemFabricHandle *export_handle)
+{
+    ucc_status_t status;
+
+    status = CUDADRV_FUNC(cuMulticastCreate(mc_handle, mc_prop));
+    if (status != UCC_OK) {
+        return UCC_ERR_NOT_SUPPORTED;
+    }
+
+    status = CUDADRV_FUNC(cuMemExportToShareableHandle(
+        export_handle, *mc_handle, mc_prop->handleTypes, 0));
+    if (status != UCC_OK) {
+        CUDADRV_FUNC(cuMemRelease(*mc_handle));
+        return status;
+    }
+
+    return UCC_OK;
+}
+
+static ucc_status_t ucc_tl_cuda_nvls_share_handles(
+    ucc_tl_cuda_team_t *team, ucc_tl_cuda_nvls_handle_t *local_handle)
+{
+    ucc_status_t status;
+
+    // If oob_req is NULL, initiate the allgather
+    if (team->oob_req == NULL) {
+        // Prepare local data based on handle type
+        // In both cases, only rank 0 creates and exports the handle
+        if (UCC_TL_TEAM_RANK(team) == 0) {
+            // Copy the local handle to the share buffer
+            team->nvls.share_data[0] = *local_handle;
+        }
+
+        // Initiate single allgather for handle data
+        status = team->oob.allgather(
+            team->nvls.share_data,
+            team->nvls.share_data,
+            sizeof(ucc_tl_cuda_nvls_handle_t),
+            team->oob.coll_info,
+            &team->oob_req);
+        if (status != UCC_OK) {
+            tl_error(
+                UCC_TL_TEAM_LIB(team),
+                "failed to initiate allgather for handles (type: %s)",
+                local_handle->type == UCC_TL_CUDA_NVLS_HANDLE_TYPE_FABRIC
+                    ? "fabric"
+                    : "posix");
+            ucc_free(team->nvls.share_data);
+            team->nvls.share_data = NULL;
+            return status;
+        }
+    }
+
+    // Test the request status
+    status = team->oob.req_test(team->oob_req);
+
+    // If still in progress, return immediately (non-blocking)
+    if (status > 0) {
+        return UCC_INPROGRESS;
+    }
+
+    // If error occurred
+    if (status < 0) {
+        tl_error(
+            UCC_TL_TEAM_LIB(team),
+            "failed to test allgather for handles (type: %s)",
+            local_handle->type == UCC_TL_CUDA_NVLS_HANDLE_TYPE_FABRIC
+                ? "fabric"
+                : "posix");
+        goto cleanup_on_error;
+    }
+
+    // Clean up
+    team->oob.req_free(team->oob_req);
+    team->oob_req = NULL;
+
+    return UCC_OK;
+
+cleanup_on_error:
+    ucc_free(team->nvls.share_data);
+    team->nvls.share_data = NULL;
+    team->oob.req_free(team->oob_req);
+    team->oob_req = NULL;
+    return status;
+}
+
+/* Log a peer-fd import failure. Always emits a debug line with the details;
+ * when the failure is a permission denial (the common single-node case: Yama
+ * ptrace_scope, missing CAP_SYS_PTRACE, or a seccomp filter blocking
+ * pidfd_getfd) it additionally emits a single, actionable warning (once per
+ * process) telling the user how to enable NVLS instead of silently losing it. */
+static void ucc_tl_cuda_nvls_report_peer_import_denied(
+    ucc_tl_cuda_team_t *team, const char *what, int err)
+{
+    static volatile int warned = 0;
+
+    tl_debug(
+        UCC_TL_TEAM_LIB(team),
+        "%s: %s (errno=%d); NVLS not available, falling back",
+        what,
+        strerror(err),
+        err);
+
+    if ((err != EPERM && err != EACCES) || warned) {
+        return;
+    }
+    warned = 1;
+    tl_warn(
+        UCC_TL_TEAM_LIB(team),
+        "NVLS disabled: importing a peer process file descriptor was denied "
+        "(%s). Single-node NVLS needs permission to access peer GPU memory "
+        "handles across processes. To enable NVLS, relax ptrace "
+        "restrictions on the host/container, e.g. host: "
+        "'sysctl -w kernel.yama.ptrace_scope=0'; docker: add "
+        "'--cap-add=SYS_PTRACE' (and if pidfd_getfd is blocked by seccomp, "
+        "'--security-opt seccomp=unconfined'); enroot: run with "
+        "'--container-remap-root' or set 'kernel.yama.ptrace_scope=0' on the "
+        "host. Collectives fall back to another transport in the meantime.",
+        strerror(err));
+}
+
+static ucc_status_t ucc_tl_cuda_nvls_import_handle_posix(
+    struct ucc_tl_cuda_team *team, ucc_tl_cuda_nvls_handle_t *share_data,
+    CUmemGenericAllocationHandle *mc_handle)
+{
+    void        *os_handle;
+    int          pid_fd, peer_fd;
+    ucc_status_t status;
+    int          export_handle;
+    pid_t        target_pid;
+
+    if (share_data->type != UCC_TL_CUDA_NVLS_HANDLE_TYPE_POSIX) {
+        tl_error(
+            UCC_TL_TEAM_LIB(team),
+            "expected POSIX handle type but got fabric handle type");
+        return UCC_ERR_INVALID_PARAM;
+    }
+
+    export_handle = share_data->data.posix.handle;
+    target_pid    = share_data->data.posix.pid;
+
+    pid_fd        = syscall(SYS_pidfd_open, target_pid, 0);
+    if (pid_fd < 0) {
+        /* Expected fallback condition (e.g. restricted ptrace/seccomp in a
+         * container): report and let the team fall back to another transport
+         * instead of emitting a scary error. */
+        ucc_tl_cuda_nvls_report_peer_import_denied(
+            team, "failed to open peer pidfd", errno);
+        return UCC_ERR_NO_RESOURCE;
+    }
+
+    peer_fd = syscall(SYS_pidfd_getfd, pid_fd, export_handle, 0);
+    if (peer_fd < 0) {
+        /* EPERM here typically means the container lacks the permissions to
+         * import a peer's fd (Yama ptrace_scope, missing CAP_SYS_PTRACE, or a
+         * seccomp filter). Supported fallback condition. */
+        ucc_tl_cuda_nvls_report_peer_import_denied(
+            team, "failed to get peer fd", errno);
+        close(pid_fd);
+        return UCC_ERR_NO_RESOURCE;
+    }
+
+    os_handle = (void *)((uint64_t)peer_fd);
+    status    = CUDADRV_FUNC(cuMemImportFromShareableHandle(
+        mc_handle, os_handle, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
+
+    if (close(peer_fd) != 0) {
+        tl_error(
+            UCC_TL_TEAM_LIB(team),
+            "failed to close peer_fd: %s (errno=%d)",
+            strerror(errno),
+            errno);
+    }
+    if (close(pid_fd) != 0) {
+        tl_error(
+            UCC_TL_TEAM_LIB(team),
+            "failed to close pid_fd: %s (errno=%d)",
+            strerror(errno),
+            errno);
+    }
+
+    if (status != UCC_OK) {
+        tl_debug(
+            UCC_TL_TEAM_LIB(team),
+            "failed to import POSIX file descriptor handle from rank 0; "
+            "NVLS not available, falling back");
+        return status;
+    }
+
+    return UCC_OK;
+}
+
+static ucc_status_t ucc_tl_cuda_nvls_import_handle_fabric(
+    struct ucc_tl_cuda_team *team, ucc_tl_cuda_nvls_handle_t *share_data,
+    CUmemGenericAllocationHandle *mc_handle)
+{
+    ucc_status_t status;
+
+    if (share_data->type != UCC_TL_CUDA_NVLS_HANDLE_TYPE_FABRIC) {
+        tl_error(
+            UCC_TL_TEAM_LIB(team),
+            "expected fabric handle type but got POSIX handle type");
+        return UCC_ERR_INVALID_PARAM;
+    }
+
+    status = CUDADRV_FUNC(cuMemImportFromShareableHandle(
+        mc_handle, &share_data->data.fabric, CU_MEM_HANDLE_TYPE_FABRIC));
+
+    if (status != UCC_OK) {
+        tl_debug(
+            UCC_TL_TEAM_LIB(team),
+            "failed to import fabric handle from rank 0. status (%d) %s; "
+            "NVLS not available, falling back",
+            status,
+            ucc_status_string(status));
+        return status;
+    }
+
+    return UCC_OK;
+}
+
+ucc_status_t ucc_tl_cuda_nvls_init(
+    struct ucc_tl_cuda_team *team, struct ucc_base_context *tl_context)
+{
+    ucc_tl_cuda_context_t *ctx = ucc_derived_of(
+        tl_context, ucc_tl_cuda_context_t);
+    ucc_tl_cuda_lib_t *lib = ucc_derived_of(tl_context->lib, ucc_tl_cuda_lib_t);
+
+    ucc_tl_cuda_nvls_t *nvls           = &team->nvls;
+    const size_t        symmetric_size = lib->cfg.max_concurrent *
+                                  (lib->cfg.nvls_symmetric_size +
+                                   NVLS_CONTROL_SIZE);
+    size_t                       mc_size    = 0;
+    CUdeviceptr                  uc_va      = 0;
+    CUdeviceptr                  mc_va      = 0;
+    ucc_status_t                 status     = UCC_OK;
+    CUmemGenericAllocationHandle mc_handle  = 0;
+    CUmemGenericAllocationHandle mem_handle = 0;
+    CUmulticastObjectProp        mc_prop    = {};
+    CUmemAllocationProp          prop       = {};
+    CUmemAccessDesc              accessDesc = {};
+    CUmemAllocationHandleType    handle_types;
+
+    switch (team->state) {
+    case UCC_TL_CUDA_NVLS_STATE_INIT:
+        // Initialize nvls struct to ensure safe cleanup on error
+        memset(nvls, 0, sizeof(*nvls));
+        // Get current device from context
+        nvls->device       = ctx->device;
+        nvls->is_multinode = !ucc_team_map_is_single_node(
+            team->super.super.params.team, team->super.super.params.map);
+
+        status = ucc_tl_cuda_nvls_check_support(
+            lib, nvls->device, nvls->is_multinode);
+        if (status != UCC_OK) {
+            return status;
+        }
+
+        if (UCC_TL_TEAM_SIZE(team) > UCC_TL_CUDA_MAX_NVLS_PEERS) {
+            tl_warn(lib,
+                    "NVLS: team size %u exceeds maximum supported peers %d; "
+                    "disabling NVLS for this team",
+                    UCC_TL_TEAM_SIZE(team), UCC_TL_CUDA_MAX_NVLS_PEERS);
+            return UCC_ERR_NOT_SUPPORTED;
+        }
+
+        if (nvls->is_multinode) {
+            ucc_team_t *ucc_team = UCC_TL_CORE_TEAM(team);
+            ucc_rank_t  min_ppn, max_ppn;
+
+            if (!ucc_topo_is_single_nvlink_domain(ucc_team->topo)) {
+                tl_warn(lib,
+                        "NVLS: multinode team does not share a single NVLink "
+                        "fabric domain (mismatched clique IDs, different NVL "
+                        "partitions, or fabric info unavailable); "
+                        "run with UCC_LOG_LEVEL=DEBUG for details; "
+                        "disabling multinode NVLS");
+                return UCC_ERR_NOT_SUPPORTED;
+            }
+
+            min_ppn = ucc_topo_min_ppn(ucc_team->topo);
+            max_ppn = ucc_topo_max_ppn(ucc_team->topo);
+            if (min_ppn != max_ppn) {
+                tl_warn(lib,
+                        "NVLS: non-uniform ppn across nodes "
+                        "(min_ppn=%u max_ppn=%u); disabling multinode NVLS",
+                        min_ppn, max_ppn);
+                return UCC_ERR_NOT_SUPPORTED;
+            }
+        }
+
+        handle_types        = nvls->is_multinode
+                                  ? CU_MEM_HANDLE_TYPE_FABRIC
+                                  : CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+
+        // Initialize multicast properties
+        mc_prop.numDevices  = UCC_TL_TEAM_SIZE(team);
+        mc_prop.size        = symmetric_size;
+        mc_prop.handleTypes = handle_types;
+        mc_prop.flags       = 0;
+
+        tl_debug(
+            UCC_TL_TEAM_LIB(team),
+            "RANK %d: numDevices: %d, size: %zu, handleTypes: %lld, "
+            "flags: %lld\n",
+            UCC_TL_TEAM_RANK(team),
+            mc_prop.numDevices,
+            mc_prop.size,
+            mc_prop.handleTypes,
+            mc_prop.flags);
+
+        // Get granularity requirements
+        status = ucc_tl_cuda_nvls_get_granularity(
+            &mc_prop, &nvls->minGran, &nvls->gran);
+        if (status != UCC_OK) {
+            return status;
+        }
+
+        if (UCC_TL_TEAM_RANK(team) == 0) {
+            tl_debug(
+                UCC_TL_TEAM_LIB(team),
+                "NVLS multicast granularity: gran = %lu, minGran = %lu\n",
+                nvls->gran,
+                nvls->minGran);
+        }
+
+        // Calculate aligned size
+        mc_size          = ucc_align_up(symmetric_size, nvls->gran);
+        mc_prop.size     = mc_size;
+        nvls->mc_size    = mc_size; // Store for later use
+
+        // Allocate buffer for gathering data from all ranks
+        nvls->share_data = (ucc_tl_cuda_nvls_handle_t *)ucc_malloc(
+            sizeof(ucc_tl_cuda_nvls_handle_t) * UCC_TL_TEAM_SIZE(team),
+            "nvls_share_data");
+        if (!nvls->share_data) {
+            return UCC_ERR_NO_MEMORY;
+        }
+
+        // Create multicast object on rank 0
+        if (UCC_TL_TEAM_RANK(team) == 0) {
+            // Initialize local handle type
+            nvls->local_handle.type = nvls->is_multinode
+                                          ? UCC_TL_CUDA_NVLS_HANDLE_TYPE_FABRIC
+                                          : UCC_TL_CUDA_NVLS_HANDLE_TYPE_POSIX;
+
+            if (nvls->is_multinode) {
+                status = ucc_tl_cuda_nvls_create_multicast_object_fabric(
+                    &mc_prop, &mc_handle, &nvls->local_handle.data.fabric);
+            } else {
+                status = ucc_tl_cuda_nvls_create_multicast_object_posix(
+                    &mc_prop,
+                    &mc_handle,
+                    &nvls->local_handle.data.posix.handle);
+            }
+            if (status != UCC_OK) {
+                tl_debug(
+                    UCC_TL_TEAM_LIB(team),
+                    "failed to create multicast object. status (%d) %s; "
+                    "NVLS not available, falling back",
+                    status,
+                    ucc_status_string(status));
+                /* Keep going to unblock peers waiting in the allgather;
+                 * propagate the error via the status field of the shared
+                 * handle so non-root ranks detect the failure explicitly. */
+                nvls->status_supported = UCC_ERR_NOT_SUPPORTED;
+            } else {
+                nvls->status_supported = UCC_OK;
+            }
+            /* Embed the error status into the handle that will be allgathered
+             * so every non-root rank can detect rank-0 failure directly. */
+            nvls->local_handle.status = nvls->status_supported;
+            // Store PID for POSIX handles
+            if (!nvls->is_multinode) {
+                nvls->local_handle.data.posix.pid = getpid();
+                // Allow peer processes to use pidfd_getfd on this process
+                // A more aggressive solution would be to modify Yama ptrace policy by
+                // running `echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope` or to run
+                // the docker container with `--cap-add=SYS_PTRACE` and `--sysctl
+                // kernel.yama.ptrace_scope=0`.
+                if (prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY) != 0) {
+                    tl_warn(
+                        UCC_TL_TEAM_LIB(team),
+                        "failed to set PR_SET_PTRACER: %s (errno=%d). "
+                        "This may cause pidfd_getfd to fail on peer processes. "
+                        "Consider adjusting Yama ptrace_scope settings: `echo "
+                        "0 | sudo tee /proc/sys/kernel/yama/ptrace_scope` or "
+                        "to run "
+                        "the docker container with `--cap-add=SYS_PTRACE` and "
+                        "`--sysctl kernel.yama.ptrace_scope=0`",
+                        strerror(errno),
+                        errno);
+                }
+            }
+            nvls->mc_handle = mc_handle;
+        }
+        team->state = UCC_TL_CUDA_NVLS_STATE_SHARE_HANDLES;
+        // fall through
+    case UCC_TL_CUDA_NVLS_STATE_SHARE_HANDLES:
+        // Share handles across ranks using unified function
+        status = ucc_tl_cuda_nvls_share_handles(team, &nvls->local_handle);
+        if (status == UCC_INPROGRESS) {
+            return status;
+        }
+        if (status != UCC_OK) {
+            goto cleanup;
+        }
+        team->state = UCC_TL_CUDA_NVLS_STATE_IMPORT_HANDLE;
+        // fall through
+    case UCC_TL_CUDA_NVLS_STATE_IMPORT_HANDLE:
+        /* Optimistically assume this rank is ready; cleared below on any local
+         * import failure so STATE_SYNC_STATUS can disable NVLS team-wide. */
+        nvls->init_ready = 1;
+        /* Non-root ranks check the status field broadcast by rank 0 before
+         * attempting to import a potentially garbage handle. */
+        if (UCC_TL_TEAM_RANK(team) != 0) {
+            if (nvls->share_data[0].status != UCC_OK) {
+                /* Rank 0 failed to create the multicast object. Every non-root
+                 * rank observes this via the broadcast status, and rank 0 bails
+                 * out below through status_supported, so the failure is already
+                 * symmetric and it is safe to clean up directly. */
+                tl_debug(
+                    UCC_TL_TEAM_LIB(team),
+                    "NVLS: rank 0 failed to create multicast object "
+                    "(status=%d); disabling NVLS for this team",
+                    nvls->share_data[0].status);
+                status = nvls->share_data[0].status;
+                nvls->status_supported = status;
+                goto cleanup;
+            }
+            if (nvls->is_multinode) {
+                status = ucc_tl_cuda_nvls_import_handle_fabric(
+                    team, &nvls->share_data[0], &mc_handle);
+            } else {
+                status = ucc_tl_cuda_nvls_import_handle_posix(
+                    team, &nvls->share_data[0], &mc_handle);
+            }
+            if (status != UCC_OK) {
+                /* Import failed on this rank only (e.g. pidfd_getfd EPERM in a
+                 * restricted container). Do NOT clean up directly: rank 0 and
+                 * the ranks that imported successfully would block forever in
+                 * the collective cuMulticastBindAddr barrier. Record the local
+                 * failure and let STATE_SYNC_STATUS propagate it so all ranks
+                 * disable NVLS together. */
+                nvls->init_ready = 0;
+            } else {
+                nvls->mc_handle = mc_handle;
+            }
+        }
+        if (nvls->status_supported != UCC_OK) {
+            /* Rank 0 local creation failure: non-root ranks already saw this via
+             * the broadcast status, so cleaning up here keeps the team
+             * symmetric. */
+            status = nvls->status_supported;
+            goto cleanup;
+        }
+        team->state = UCC_TL_CUDA_NVLS_STATE_SYNC_STATUS;
+        // fall through
+    case UCC_TL_CUDA_NVLS_STATE_SYNC_STATUS:
+    {
+        /* Collectively agree on whether every rank imported the multicast
+         * handle. If any rank failed, all ranks skip the multicast binding and
+         * fall back together; otherwise the ranks that succeeded would deadlock
+         * in cuMulticastBindAddr waiting for the failed rank to call
+         * cuMulticastAddDevice. */
+        ucc_rank_t r;
+
+        if (nvls->init_sync_data == NULL) {
+            nvls->init_sync_data = (char *)ucc_malloc(
+                UCC_TL_TEAM_SIZE(team), "nvls_init_sync");
+            if (!nvls->init_sync_data) {
+                status = UCC_ERR_NO_MEMORY;
+                goto cleanup;
+            }
+            nvls->init_sync_data[UCC_TL_TEAM_RANK(team)] = (char)
+                                                               nvls->init_ready;
+        }
+
+        if (team->oob_req == NULL) {
+            status = team->oob.allgather(
+                &nvls->init_sync_data[UCC_TL_TEAM_RANK(team)],
+                nvls->init_sync_data,
+                1,
+                team->oob.coll_info,
+                &team->oob_req);
+            if (status != UCC_OK) {
+                tl_error(
+                    UCC_TL_TEAM_LIB(team),
+                    "failed to initiate NVLS init status exchange");
+                goto cleanup;
+            }
+        }
+
+        status = team->oob.req_test(team->oob_req);
+        if (status > 0) {
+            return UCC_INPROGRESS;
+        }
+        if (status < 0) {
+            tl_error(UCC_TL_TEAM_LIB(team), "NVLS init status exchange failed");
+            team->oob.req_free(team->oob_req);
+            team->oob_req = NULL;
+            goto cleanup;
+        }
+        team->oob.req_free(team->oob_req);
+        team->oob_req = NULL;
+
+        for (r = 0; r < UCC_TL_TEAM_SIZE(team); r++) {
+            if (nvls->init_sync_data[r] == 0) {
+                tl_debug(
+                    UCC_TL_TEAM_LIB(team),
+                    "NVLS: rank %u could not initialize NVLS; disabling "
+                    "NVLS for the whole team and falling back",
+                    r);
+                status = UCC_ERR_NOT_SUPPORTED;
+                goto cleanup;
+            }
+        }
+        ucc_free(nvls->init_sync_data);
+        nvls->init_sync_data = NULL;
+        team->state = UCC_TL_CUDA_NVLS_STATE_ADD_DEVICE;
+        // fall through
+    }
+    case UCC_TL_CUDA_NVLS_STATE_ADD_DEVICE:
+    {
+        // Allocate physical memory
+        prop.type          = CU_MEM_ALLOCATION_TYPE_PINNED;
+        prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+        prop.location.id   = nvls->device;
+        prop.requestedHandleTypes =
+            nvls->is_multinode ? CU_MEM_HANDLE_TYPE_FABRIC
+                               : CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+
+        mc_size = nvls->mc_size;
+        status  = CUDADRV_FUNC(cuMemCreate(&mem_handle, mc_size, &prop, 0));
+        if (status != UCC_OK) {
+            tl_error(UCC_TL_TEAM_LIB(team),
+                     "failed to create memory allocation for multicast");
+            goto cleanup;
+        }
+
+        // Set up memory access descriptor
+        accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+        accessDesc.location.id   = nvls->device;
+        accessDesc.flags         = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+
+        // Reserve and map unicast virtual address space
+        status = CUDADRV_FUNC(
+            cuMemAddressReserve(&uc_va, mc_size, nvls->minGran, 0U, 0));
+        if (status != UCC_OK) {
+            tl_error(UCC_TL_TEAM_LIB(team),
+                     "failed to reserve virtual address space");
+            goto cleanup;
+        }
+
+        status = CUDADRV_FUNC(cuMemMap(uc_va, mc_size, 0, mem_handle, 0));
+        if (status != UCC_OK) {
+            tl_error(UCC_TL_TEAM_LIB(team), "failed to map memory allocation");
+            goto cleanup;
+        }
+
+        status = CUDADRV_FUNC(cuMemSetAccess(uc_va, mc_size, &accessDesc, 1));
+        if (status != UCC_OK) {
+            tl_error(UCC_TL_TEAM_LIB(team), "failed to set memory access");
+            goto cleanup;
+        }
+
+        /* Allocate and zero coll_ids */
+        nvls->coll_ids = (size_t *)ucc_malloc(
+            lib->cfg.max_concurrent * sizeof(size_t), "coll_ids");
+        if (!nvls->coll_ids) {
+            status = UCC_ERR_NO_MEMORY;
+            goto cleanup;
+        }
+        memset(nvls->coll_ids, 0, lib->cfg.max_concurrent * sizeof(size_t));
+
+        /* ALL ranks zero their control region via UC VA BEFORE cuMulticastAddDevice.
+         * cuMulticastBindAddr is a collective barrier; when it returns every rank
+         * has finished its memset, so arrival_counter starts at 0 everywhere. */
+        tl_debug(UCC_TL_TEAM_LIB(team),
+                 "NVLS init: rank %d initialising control regions "
+                 "uc_va=%p symm_size=%zu ctrl_size=%d slots=%u",
+                 UCC_TL_TEAM_RANK(team), (void *)uc_va,
+                 lib->cfg.nvls_symmetric_size, NVLS_CONTROL_SIZE,
+                 lib->cfg.max_concurrent);
+        CUDA_CHECK_GOTO(cudaMemset2D(
+            (void *)(uc_va + lib->cfg.nvls_symmetric_size),
+            lib->cfg.nvls_symmetric_size + NVLS_CONTROL_SIZE,
+            0,
+            NVLS_CONTROL_SIZE,
+            lib->cfg.max_concurrent), cleanup, status);
+
+        /* Add device to multicast object */
+        status = CUDADRV_FUNC(
+            cuMulticastAddDevice(nvls->mc_handle, nvls->device));
+        if (status != UCC_OK) {
+            tl_error(UCC_TL_TEAM_LIB(team),
+                     "failed to add device to multicast");
+            goto cleanup;
+        }
+        tl_debug(UCC_TL_TEAM_LIB(team),
+                 "RANK %d: added device %d to multicast",
+                 UCC_TL_TEAM_RANK(team), nvls->device);
+
+        /* Bind memory to multicast object; blocks until all ranks call
+         * cuMulticastAddDevice, acting as a collective barrier. */
+        status = CUDADRV_FUNC(cuMulticastBindAddr(
+            nvls->mc_handle, 0 /*mcOffset*/, uc_va, mc_size, 0));
+        if (status != UCC_OK) {
+            tl_error(UCC_TL_TEAM_LIB(team),
+                     "failed to bind memory to multicast");
+            goto cleanup;
+        }
+
+        // Reserve and map multicast virtual address space
+        status = CUDADRV_FUNC(
+            cuMemAddressReserve(&mc_va, mc_size, nvls->minGran, 0U, 0));
+        if (status != UCC_OK) {
+            tl_error(UCC_TL_TEAM_LIB(team),
+                     "failed to reserve multicast virtual address space");
+            goto cleanup;
+        }
+
+        status = CUDADRV_FUNC(cuMemMap(mc_va, mc_size, 0, nvls->mc_handle, 0));
+        if (status != UCC_OK) {
+            tl_error(UCC_TL_TEAM_LIB(team), "failed to map multicast memory");
+            goto cleanup;
+        }
+
+        status = CUDADRV_FUNC(cuMemSetAccess(mc_va, mc_size, &accessDesc, 1));
+        if (status != UCC_OK) {
+            tl_error(UCC_TL_TEAM_LIB(team),
+                     "failed to set multicast memory access");
+            goto cleanup;
+        }
+
+        tl_debug(UCC_TL_TEAM_LIB(team),
+                 "Rank: %d symmetric memory is set: %p [%ld bytes]",
+                 UCC_TL_TEAM_RANK(team), (void *)mc_va, mc_size);
+
+        // Store the handles for cleanup in team destroy
+        nvls->mc_va        = mc_va;
+        nvls->uc_va        = uc_va;
+        nvls->mc_memhandle = mem_handle;
+        nvls->mc_offset    = 0;
+
+        team->state = UCC_TL_CUDA_NVLS_STATE_BARRIER;
+        /* fall through */
+    }
+    case UCC_TL_CUDA_NVLS_STATE_BARRIER:
+    {
+        /* Final OOB barrier — ensures all ranks have completed the NVLS
+         * memory setup (including any async fabric operations) before any
+         * collective can use the team. */
+        if (nvls->barrier_data == NULL) {
+            nvls->barrier_data = (char *)ucc_malloc(
+                UCC_TL_TEAM_SIZE(team), "nvls_barrier");
+            if (!nvls->barrier_data) {
+                status = UCC_ERR_NO_MEMORY;
+                goto cleanup;
+            }
+            nvls->barrier_data[UCC_TL_TEAM_RANK(team)] = 1;
+        }
+
+        if (team->oob_req == NULL) {
+            status = team->oob.allgather(
+                &nvls->barrier_data[UCC_TL_TEAM_RANK(team)],
+                nvls->barrier_data,
+                1,
+                team->oob.coll_info,
+                &team->oob_req);
+            if (status != UCC_OK) {
+                tl_error(UCC_TL_TEAM_LIB(team),
+                         "failed to initiate NVLS barrier");
+                ucc_free(nvls->barrier_data);
+                nvls->barrier_data = NULL;
+                goto cleanup;
+            }
+        }
+
+        status = team->oob.req_test(team->oob_req);
+        if (status > 0) {
+            return UCC_INPROGRESS;
+        }
+        if (status < 0) {
+            tl_error(UCC_TL_TEAM_LIB(team), "NVLS barrier failed");
+            team->oob.req_free(team->oob_req);
+            team->oob_req = NULL;
+            ucc_free(nvls->barrier_data);
+            nvls->barrier_data = NULL;
+            goto cleanup;
+        }
+
+        team->oob.req_free(team->oob_req);
+        team->oob_req = NULL;
+        ucc_free(nvls->barrier_data);
+        nvls->barrier_data = NULL;
+
+        /* NVLS is fully initialized for this team; only now may collectives be
+         * routed to the NVLS algorithms (see ucc_tl_cuda_get_supported_colls). */
+        nvls->enabled      = 1;
+        tl_debug(UCC_TL_TEAM_LIB(team),
+                 "NVLS init: rank %d OOB barrier complete — team ready",
+                 UCC_TL_TEAM_RANK(team));
+        break;
+    }
+    default:
+        break;
+    }
+
+    return UCC_OK;
+
+cleanup:
+    // Cleanup on error - free state-stored temporary allocations
+    if (nvls->share_data) {
+        ucc_free(nvls->share_data);
+        nvls->share_data = NULL;
+    }
+    if (nvls->barrier_data) {
+        ucc_free(nvls->barrier_data);
+        nvls->barrier_data = NULL;
+    }
+    if (nvls->init_sync_data) {
+        ucc_free(nvls->init_sync_data);
+        nvls->init_sync_data = NULL;
+    }
+
+    // Clean up CUDA resources - check local variables for partial allocations
+    // Unmap and free multicast VA if it was reserved/mapped
+    if (mc_va != 0) {
+        if (CUDADRV_FUNC(cuMemUnmap(mc_va, mc_size)) != UCC_OK) {
+            tl_error(UCC_TL_TEAM_LIB(team),
+                     "failed to unmap mc_va during cleanup");
+        }
+        if (CUDADRV_FUNC(cuMemAddressFree(mc_va, mc_size)) != UCC_OK) {
+            tl_error(UCC_TL_TEAM_LIB(team),
+                     "failed to free mc_va during cleanup");
+        }
+        nvls->mc_va = 0;
+    }
+
+    // Unmap and free unicast VA if it was reserved/mapped
+    if (uc_va != 0) {
+        if (CUDADRV_FUNC(cuMemUnmap(uc_va, mc_size)) != UCC_OK) {
+            tl_error(UCC_TL_TEAM_LIB(team),
+                     "failed to unmap uc_va during cleanup");
+        }
+        if (CUDADRV_FUNC(cuMemAddressFree(uc_va, mc_size)) != UCC_OK) {
+            tl_error(UCC_TL_TEAM_LIB(team),
+                     "failed to free uc_va during cleanup");
+        }
+        nvls->uc_va = 0;
+    }
+
+    // Release memory handle if it was created
+    if (mem_handle != 0) {
+        if (CUDADRV_FUNC(cuMemRelease(mem_handle)) != UCC_OK) {
+            tl_error(UCC_TL_TEAM_LIB(team),
+                     "failed to release mem_handle during cleanup");
+        }
+        nvls->mc_memhandle = 0;
+    }
+
+    // Release multicast handle if it was created or imported
+    if (nvls->mc_handle != 0) {
+        if (CUDADRV_FUNC(cuMemRelease(nvls->mc_handle)) != UCC_OK) {
+            tl_error(UCC_TL_TEAM_LIB(team),
+                     "failed to release mc_handle during cleanup");
+        }
+        nvls->mc_handle = 0;
+    }
+
+    // Free coll_ids if allocated
+    if (nvls->coll_ids) {
+        ucc_free(nvls->coll_ids);
+        nvls->coll_ids = NULL;
+    }
+
+    return status;
+}
+
+ucc_status_t ucc_tl_cuda_nvls_destroy(ucc_tl_cuda_team_t *team)
+{
+    int device = team->nvls.device;
+
+    // Rank 0: unbind the multicast object
+    if (UCC_TL_TEAM_RANK(team) == 0 && team->nvls.mc_handle) {
+        CUDADRV_FUNC(cuMulticastUnbind(
+            team->nvls.mc_handle,
+            device,
+            team->nvls.mc_offset,
+            team->nvls.mc_size));
+    }
+
+    // ALL ranks: release their multicast handle (created or imported)
+    if (team->nvls.mc_handle) {
+        CUDADRV_FUNC(cuMemRelease(team->nvls.mc_handle));
+        team->nvls.mc_handle = 0;
+    }
+
+    // ALL ranks: clean up their mapped memory
+    if (team->nvls.mc_va) {
+        CUDADRV_FUNC(cuMemUnmap(team->nvls.mc_va, team->nvls.mc_size));
+        CUDADRV_FUNC(cuMemAddressFree(team->nvls.mc_va, team->nvls.mc_size));
+    }
+    if (team->nvls.uc_va) {
+        CUDADRV_FUNC(cuMemUnmap(team->nvls.uc_va, team->nvls.mc_size));
+        CUDADRV_FUNC(cuMemAddressFree(team->nvls.uc_va, team->nvls.mc_size));
+    }
+    // ALL ranks: release their memory handle
+    if (team->nvls.mc_memhandle) {
+        CUDADRV_FUNC(cuMemRelease(team->nvls.mc_memhandle));
+    }
+    // ALL ranks: free coll_ids
+    if (team->nvls.coll_ids) {
+        ucc_free(team->nvls.coll_ids);
+        team->nvls.coll_ids = NULL;
+    }
+    if (team->nvls.share_data) {
+        ucc_free(team->nvls.share_data);
+        team->nvls.share_data = NULL;
+    }
+    if (team->nvls.barrier_data) {
+        ucc_free(team->nvls.barrier_data);
+        team->nvls.barrier_data = NULL;
+    }
+    if (team->nvls.init_sync_data) {
+        ucc_free(team->nvls.init_sync_data);
+        team->nvls.init_sync_data = NULL;
+    }
+    return UCC_OK;
+}

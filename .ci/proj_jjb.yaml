@@ -1,0 +1,405 @@
+- job-template:
+    name: "{jjb_proj}-test-nvls"
+    project-type: pipeline
+    folder: "{jjb_folder}"
+    properties:
+      - github:
+          url: "{jjb_git_web}"
+      - build-discarder:
+          days-to-keep: 30
+          num-to-keep: 20
+      - inject:
+          keep-system-variables: true
+          properties-content: |
+            jjb_proj="{jjb_proj}-test-nvls"
+    description: Do NOT edit this job through the Web GUI !
+    concurrent: true
+    sandbox: true
+    parameters:
+      - string:
+          name: "sha1"
+          default: "{jjb_branch}"
+          description: "Commit to be checked, set by PR"
+      - string:
+          name: "UCC_VERSION"
+          default: "1.0.0"
+          description: "UCC version"
+      - string:
+          name: "githubData"
+          default: ""
+          description: "Blossom CI Variables from post"
+      - bool:
+          name: "BUILD_DOCKERS"
+          default: true
+          description: "Rebuild docker containers"
+      - string:
+          name: "CONF_FILE"
+          default: ".ci/pipeline/test_nvls_matrix.yaml"
+          description: "Regex to select job config file"
+      - string:
+          name: "DEBUG"
+          default: 0
+          description: "Enable debug prints and traces, valid values are 0-9"
+    pipeline-scm:
+      scm:
+        - git:
+            url: "{jjb_git}"
+            credentials-id: "{jjb_gh_auth_id}"
+            branches: [ '$sha1' ]
+            shallow-clone: true
+            depth: 10
+            refspec: "+refs/heads/*:refs/remotes/origin/* +refs/pull/*:refs/remotes/origin/pr/*"
+            browser: githubweb
+            browser-url: "{jjb_git}"
+      script-path: "{jjb_jenkinsfile}"
+
+- job-template:
+    name: "{jjb_proj}-build-hpcsdk"
+    folder: "{jjb_folder}"
+    project-type: pipeline
+    properties:
+      - github:
+          url: "{jjb_git_web}"
+      - build-discarder:
+          days-to-keep: 30
+          num-to-keep: 20
+      - inject:
+          keep-system-variables: true
+          properties-content: |
+            jjb_proj="{jjb_proj}-build-hpcsdk"
+    description: Do NOT edit this job through the Web GUI !
+    concurrent: true
+    sandbox: true
+    parameters:
+      - string:
+          name: "sha1"
+          default: "{jjb_branch}"
+          description: "Commit to be checked, set by PR"
+      - string:
+          name: "DEBUG"
+          default: 0
+          description: "Enable debug prints and traces, valid values are 0-9"
+      - bool:
+          name: "BUILD_DOCKERS"
+          default: false
+          description: "Rebuild docker containers"
+      - string:
+          name: "CONF_FILE"
+          default: ".ci/pipeline/build_hpcsdk_matrix.yaml"
+          description: "Regex to select job config file"
+      - string:
+          name: "githubData"
+          default: ""
+          description: "Variables from post"
+    pipeline-scm:
+      scm:
+        - git:
+            url: "{jjb_git}"
+            credentials-id: "{jjb_gh_auth_id}"
+            branches: [ '$sha1' ]
+            shallow-clone: true
+            depth: 10
+            refspec: "+refs/heads/*:refs/remotes/origin/* +refs/pull/*:refs/remotes/origin/pr/*"
+            browser: githubweb
+            browser-url: "{jjb_git}"
+      script-path: "{jjb_jenkinsfile}"
+
+- job-template:
+    name: "{jjb_proj}-ci-dispatcher"
+    project-type: pipeline
+    folder: "{jjb_folder}"
+    properties:
+      - github:
+          url: "{jjb_git_web}"
+      - build-discarder:
+          days-to-keep: 14
+          num-to-keep: 1000
+      - inject:
+          keep-system-variables: true
+          properties-content: |
+            jjb_proj={jjb_proj}-ci-dispatcher
+    triggers:
+      - generic-webhook-trigger:
+          token: "{jjb_proj}-ci-dispatcher"
+          print-contributors: true
+          print-posted-content: true
+          silent-response: false
+          cause: "Generic Cause"
+          post-content-params:
+            - type: JSONPath
+              key: githubData
+              value: $
+            - type: JSONPath
+              key: VARIABLE_FROM_POST
+              value: $
+    description: Do NOT edit this job through the Web GUI !
+    concurrent: true
+    sandbox: true
+    parameters:
+      - string:
+          name: "VARIABLE_FROM_POST"
+          default: ""
+          description: ""
+    dsl: |
+      @Library('blossom-github-lib@master')
+      import ipp.blossom.*
+      import hudson.model.ParametersAction
+      import groovy.json.JsonSlurper
+
+      def getPrNumberFromPayload(String jsonStr) {{
+        if (!jsonStr?.trim()) return null
+        try {{
+          def payload = new JsonSlurper().parseText(jsonStr)
+          return payload?.issue?.number?.toString() ?: payload?.pull_request?.number?.toString()
+        }} catch (Exception e) {{ return null }}
+      }}
+      def currentPrNum = getPrNumberFromPayload(VARIABLE_FROM_POST)
+      if (currentPrNum) {{
+        def jenkins = Jenkins.get()
+        def currentBuildNum = env.BUILD_NUMBER as int
+        def folderName = "{jjb_folder}"
+        def dispatcherJobName = "ucc-ci-dispatcher"
+        def childJobNames = ["ucc-build-hpcsdk", "ucc-test-nvls", "ucc-run-coverity", "ucc-test-gtest", "ucc-test-mpi"]
+        ([dispatcherJobName] + childJobNames).each {{ jobName ->
+          def job = jenkins.getItemByFullName("${{folderName}}/${{jobName}}")
+          if (job) {{
+            job.getBuilds().each {{ b ->
+              if (!b.isBuilding()) return
+              if (jobName == dispatcherJobName && b.number >= currentBuildNum) return
+              def pa = b.getAction(ParametersAction.class)
+              if (!pa) return
+              def prevJson = (jobName == dispatcherJobName)
+                ? pa.getParameter("VARIABLE_FROM_POST")?.value
+                : pa.getParameter("githubData")?.value
+              def prevPrNum = getPrNumberFromPayload(prevJson)
+              if (prevPrNum == currentPrNum) {{
+                echo "Aborting previous build ${{jobName}} #${{b.number}} (same PR ${{currentPrNum}})"
+                b.doStop()
+              }}
+            }}
+          }}
+        }}
+      }}
+      withCredentials([usernamePassword(credentialsId: 'svcnbu-swx-hpcx-github-token', passwordVariable: 'GIT_PASSWORD', usernameVariable: 'GIT_USERNAME')]) {{
+        githubHelper = GithubHelper.getInstance("${{GIT_PASSWORD}}", VARIABLE_FROM_POST)
+      }}
+      def pipelineOverviewUrl = "${{env.BUILD_URL}}/pipeline-overview/"
+      githubHelper.updateCommitStatus(pipelineOverviewUrl, "Blossom CI started", GitHubCommitState.PENDING)
+      currentBuild.description = githubHelper.getBuildDescription()
+      try {{
+        parallel 'ucc-build-hpcsdk': {{
+            def jobName = 'ucc-build-hpcsdk'
+            build job: jobName, parameters: [
+                string(name: 'sha1', value: githubHelper.getMergedSHA()),
+                string(name: 'githubData', value: VARIABLE_FROM_POST)
+            ], propagate: false, wait: true
+        }}, 'ucc-test-nvls': {{
+            def jobName = 'ucc-test-nvls'
+            build job: jobName, parameters: [
+                string(name: 'sha1', value: githubHelper.getMergedSHA()),
+                string(name: 'githubData', value: VARIABLE_FROM_POST)
+            ], propagate: false, wait: true
+        }}, 'ucc-run-coverity': {{
+            def jobName = 'ucc-run-coverity'
+            build job: jobName, parameters: [
+                string(name: 'sha1', value: githubHelper.getMergedSHA()),
+                string(name: 'githubData', value: VARIABLE_FROM_POST)
+            ], propagate: false, wait: true
+        }}, 'ucc-test-gtest': {{
+            def jobName = 'ucc-test-gtest'
+            build job: jobName, parameters: [
+                string(name: 'sha1', value: githubHelper.getMergedSHA()),
+                string(name: 'githubData', value: VARIABLE_FROM_POST)
+            ], propagate: false, wait: true
+        }}, 'ucc-test-mpi': {{
+            def jobName = 'ucc-test-mpi'
+            build job: jobName, parameters: [
+                string(name: 'sha1', value: githubHelper.getMergedSHA()),
+                string(name: 'githubData', value: VARIABLE_FROM_POST)
+            ], propagate: false, wait: true
+        }}
+        githubHelper.updateCommitStatus(pipelineOverviewUrl, "Blossom CI ended", GitHubCommitState.SUCCESS)
+      }} catch(Exception ex) {{
+          println ex
+          githubHelper.updateCommitStatus(pipelineOverviewUrl, "Blossom CI ended", GitHubCommitState.FAILURE)
+          throw ex
+      }}
+
+- job-template:
+    name: "{jjb_proj}-run-coverity"
+    folder: "{jjb_folder}"
+    project-type: pipeline
+    properties:
+      - github:
+          url: "{jjb_git_web}"
+      - build-discarder:
+          days-to-keep: 30
+          num-to-keep: 20
+      - inject:
+          keep-system-variables: true
+          properties-content: |
+            jjb_proj="{jjb_proj}-run-coverity"
+    description: Do NOT edit this job through the Web GUI !
+    concurrent: true
+    sandbox: true
+    parameters:
+      - string:
+          name: "sha1"
+          default: "{jjb_branch}"
+          description: "Commit to be checked, set by PR"
+      - string:
+          name: "DEBUG"
+          default: 0
+          description: "Enable debug prints and traces, valid values are 0-9"
+      - bool:
+          name: "BUILD_DOCKERS"
+          default: false
+          description: "Rebuild docker containers"
+      - string:
+          name: "CONF_FILE"
+          default: ".ci/pipeline/run_coverity_matrix.yaml"
+          description: "Regex to select job config file"
+      - string:
+          name: "githubData"
+          default: ""
+          description: "Variables from post"
+    pipeline-scm:
+      scm:
+        - git:
+            url: "{jjb_git}"
+            credentials-id: "{jjb_gh_auth_id}"
+            branches: [ '$sha1' ]
+            shallow-clone: true
+            depth: 10
+            refspec: "+refs/heads/*:refs/remotes/origin/* +refs/pull/*:refs/remotes/origin/pr/*"
+            browser: githubweb
+            browser-url: "{jjb_git}"
+      script-path: "{jjb_jenkinsfile}"
+
+- job-template:
+    name: "{jjb_proj}-test-gtest"
+    project-type: pipeline
+    folder: "{jjb_folder}"
+    properties:
+      - github:
+          url: "{jjb_git_web}"
+      - build-discarder:
+          days-to-keep: 30
+          num-to-keep: 20
+      - inject:
+          keep-system-variables: true
+          properties-content: |
+            jjb_proj="{jjb_proj}-test-gtest"
+    description: Do NOT edit this job through the Web GUI !
+    concurrent: true
+    sandbox: true
+    parameters:
+      - string:
+          name: "sha1"
+          default: "{jjb_branch}"
+          description: "Commit to be checked, set by PR"
+      - string:
+          name: "UCC_VERSION"
+          default: "1.0.0"
+          description: "UCC version"
+      - string:
+          name: "githubData"
+          default: ""
+          description: "Blossom CI Variables from post"
+      - bool:
+          name: "BUILD_DOCKERS"
+          default: true
+          description: "Rebuild docker containers"
+      - string:
+          name: "CONF_FILE"
+          default: ".ci/pipeline/test_gtest_matrix.yaml"
+          description: "Regex to select job config file"
+      - string:
+          name: "DEBUG"
+          default: 0
+          description: "Enable debug prints and traces, valid values are 0-9"
+    pipeline-scm:
+      scm:
+        - git:
+            url: "{jjb_git}"
+            credentials-id: "{jjb_gh_auth_id}"
+            branches: [ '$sha1' ]
+            shallow-clone: true
+            depth: 10
+            refspec: "+refs/heads/*:refs/remotes/origin/* +refs/pull/*:refs/remotes/origin/pr/*"
+            browser: githubweb
+            browser-url: "{jjb_git}"
+      script-path: "{jjb_jenkinsfile}"
+
+- job-template:
+    name: "{jjb_proj}-test-mpi"
+    project-type: pipeline
+    folder: "{jjb_folder}"
+    properties:
+      - github:
+          url: "{jjb_git_web}"
+      - build-discarder:
+          days-to-keep: 30
+          num-to-keep: 20
+      - inject:
+          keep-system-variables: true
+          properties-content: |
+            jjb_proj="{jjb_proj}-test-mpi"
+    description: Do NOT edit this job through the Web GUI !
+    concurrent: true
+    sandbox: true
+    parameters:
+      - string:
+          name: "sha1"
+          default: "{jjb_branch}"
+          description: "Commit to be checked, set by PR"
+      - string:
+          name: "UCC_VERSION"
+          default: "1.0.0"
+          description: "UCC version"
+      - string:
+          name: "githubData"
+          default: ""
+          description: "Blossom CI Variables from post"
+      - bool:
+          name: "BUILD_DOCKERS"
+          default: true
+          description: "Rebuild docker containers"
+      - string:
+          name: "CONF_FILE"
+          default: ".ci/pipeline/test_mpi_matrix.yaml"
+          description: "Regex to select job config file"
+      - string:
+          name: "DEBUG"
+          default: 0
+          description: "Enable debug prints and traces, valid values are 0-9"
+    pipeline-scm:
+      scm:
+        - git:
+            url: "{jjb_git}"
+            credentials-id: "{jjb_gh_auth_id}"
+            branches: [ '$sha1' ]
+            shallow-clone: true
+            depth: 10
+            refspec: "+refs/heads/*:refs/remotes/origin/* +refs/pull/*:refs/remotes/origin/pr/*"
+            browser: githubweb
+            browser-url: "{jjb_git}"
+      script-path: "{jjb_jenkinsfile}"
+
+- project:
+    name: ucc-build
+    jjb_proj: 'ucc'
+    jjb_git: 'git@github.com:openucx/ucc.git'
+    jjb_git_web: 'https://github.com/openucx/ucc'
+    jjb_branch: 'master'
+    jjb_folder: "UCC"
+    jjb_owner: 'ucc-devops'
+    jjb_jenkinsfile: '.ci/Jenkinsfile.shlib'
+    jjb_gh_auth_id: 'svcnbu-swx-hpcx_ssh_with_key'
+    jobs:
+      - "{jjb_proj}-build-hpcsdk"
+      - "{jjb_proj}-ci-dispatcher"
+      - "{jjb_proj}-test-nvls"
+      - "{jjb_proj}-run-coverity"
+      - "{jjb_proj}-test-gtest"
+      - "{jjb_proj}-test-mpi"

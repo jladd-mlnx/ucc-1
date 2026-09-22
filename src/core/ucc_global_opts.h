@@ -1,5 +1,6 @@
 /**
- * Copyright (C) Mellanox Technologies Ltd. 2020-2021.  ALL RIGHTS RESERVED.
+ * Copyright (c) 2020-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *
  * See file LICENSE for terms.
  */
 
@@ -10,19 +11,59 @@
 #include "utils/ucc_component.h"
 
 #include "utils/ucc_parser.h"
-#include "utils/ucc_log.h"
+#include "utils/debug/types.h"
 
 typedef struct ucc_global_config {
     /* Log level above which log messages will be printed*/
     ucc_log_component_config_t log_component;
+    /* Print collective info for each initialized collective */
+    ucc_log_component_config_t coll_trace;
     ucc_component_framework_t  cl_framework;
     ucc_component_framework_t  tl_framework;
     ucc_component_framework_t  mc_framework;
+    ucc_component_framework_t  ec_framework;
+    ucc_component_framework_t  sysinfo_framework;
 
     /* Coll component libraries path */
     char *component_path;
-    char *component_path_default;
+    char *install_path;
+    /* Modules filter (allow/negate list) */
+    ucc_config_allow_list_t modules;
     int   initialized;
+    /* Profiling mode */
+    uint64_t                   profile_mode;
+
+    /* Profiling output file name */
+    char *profile_file;
+
+    /* Limit for profiling log size */
+    size_t                     profile_log_size;
+    char                      *cfg_filename;
+    ucc_file_config_t         *file_cfg;
+
+    /* Log file */
+    char                       *log_file;
+
+    /* Maximal log file size */
+    size_t                     log_file_size;
+
+    /* Maximal backup log files count that could be created by log infrastructure */
+    unsigned                   log_file_rotate;
+
+    /* Size of log buffer for one message */
+    size_t                     log_buffer_size;
+
+    /* Maximal amount of packet data to print per packet */
+    size_t                     log_data_size;
+
+    /* Enable ucc_print() output */
+    int                        log_print_enable;
+
+    /* Log level to trigger error handling */
+    ucc_log_level_t            log_level_trigger;
+
+    /* Check for asymmetric datatypes in rooted collectives */
+    int                        check_asymmetric_dt;
 } ucc_global_config_t;
 
 extern ucc_global_config_t ucc_global_config;

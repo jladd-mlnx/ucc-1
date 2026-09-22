@@ -1,7 +1,7 @@
 /**
  * @file ucc_def.h
  * @date 2020
- * @copyright Copyright (C) Mellanox Technologies Ltd. 2020.  ALL RIGHTS RESERVED.
+ * @copyright (c) 2020, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * @copyright Copyright (C) Huawei Technologies Co., Ltd. 2020.  ALL RIGHTS RESERVED.
  *
  * See file LICENSE for terms.
@@ -64,6 +64,18 @@ typedef struct ucc_coll_req {
 } ucc_coll_req_t;
 
 /**
+ * @ingroup UCC_COLLECTIVES_DT
+ * @brief UCC collective completion callback
+ *
+ * The callback is invoked whenever the collective operation is completed.
+ * It is not allowed to call UCC APIs from the completion callback except
+ * for @ref ucc_collective_finalize.
+ */
+typedef struct ucc_coll_callback {
+    void (*cb)(void *data, ucc_status_t status);
+    void  *data;
+} ucc_coll_callback_t;
+/**
  * @ingroup UCC_COLLECTIVES
  * @brief UCC memory handle
  *
@@ -102,6 +114,8 @@ typedef uint64_t ucc_aint_t;
 /* Reflects the definition in UCS - The i-th bit */
 #define UCC_BIT(i)               (1ul << (i))
 
+#define UCC_MASK(i)              (UCC_BIT(i) - 1)
+
 /* Reflects the definition in UCS */
 /**
  * @ingroup UCC_UTILS
@@ -128,10 +142,39 @@ typedef void *ucc_p2p_conn_t;
 /**
  * @ingroup UCC_TEAM_DT
  */
-typedef void *ucc_context_addr_t;
+typedef void* ucc_context_addr_h;
 
 /**
  * @ingroup UCC_TEAM_DT
  */
 typedef size_t ucc_context_addr_len_t;
+
+
+/**
+ * @ingroup UCC_EVENT_DT
+ * @brief UCC execution engine handle
+ *
+ * The UCC execution engine handle is an opaque handle created by the library representing
+ * the execution context and related queues.
+ */
+typedef struct ucc_ee*      ucc_ee_h;
+
+typedef struct ucc_dt_generic ucc_dt_generic_t;
+/**
+ * @ingroup UCC_DATATYPE
+ * @brief Helper enum for generic/predefined datatype representation
+ *
+ */
+typedef enum {
+    UCC_DATATYPE_PREDEFINED = 0,
+    UCC_DATATYPE_GENERIC    = UCC_BIT(0),
+    UCC_DATATYPE_SHIFT      = 3,
+    UCC_DATATYPE_CLASS_MASK = UCC_MASK(UCC_DATATYPE_SHIFT)
+} ucc_dt_type_t;
+
+#define UCC_PREDEFINED_DT(_id) \
+    (ucc_datatype_t)((((uint64_t)(_id)) << UCC_DATATYPE_SHIFT) | \
+                     (UCC_DATATYPE_PREDEFINED))
+
+
 #endif

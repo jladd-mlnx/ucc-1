@@ -1,5 +1,5 @@
 /**
- * Copyright (C) Mellanox Technologies Ltd. 2001-2020.  ALL RIGHTS RESERVED.
+ * Copyright (c) 2001-2020, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See file LICENSE for terms.
  */
@@ -12,6 +12,7 @@ void print_version()
 {
     printf("# UCC version=%s revision %s\n", UCC_VERSION_STRING,
            UCC_GIT_REVISION);
+    printf("# Configured with: %s\n", UCC_CONFIGURE_FLAGS);
 }
 
 void print_build_config()

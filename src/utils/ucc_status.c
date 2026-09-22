@@ -1,5 +1,5 @@
 /**
- * Copyright (C) Mellanox Technologies Ltd. 2021.  ALL RIGHTS RESERVED.
+ * Copyright (c) 2021, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * See file LICENSE for terms.
  */
 
@@ -32,6 +32,8 @@ const char *ucc_status_string(ucc_status_t status)
         return "Unhandled error";
     case UCC_ERR_NOT_FOUND:
         return "Not found";
+    case UCC_ERR_TIMED_OUT:
+        return "Timeout expired";
     default:
         snprintf(error_str, sizeof(error_str) - 1, "Unknown error %d", status);
         return error_str;

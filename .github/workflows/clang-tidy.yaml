@@ -2,34 +2,61 @@ name: Linter
 
 on: [push, pull_request]
 
+concurrency:
+  group: lint-cpu-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   OPEN_UCX_LINK: https://github.com/openucx/ucx
   OPEN_UCX_BRANCH: master
+  CLANG_VER: 17
 jobs:
   clang-tidy:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    name: clang-tidy
     steps:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y --no-install-recommends wget lsb-core software-properties-common
-        sudo bash -c "$(wget -O - https://apt.llvm.org/llvm.sh)"
-        sudo apt-get install -y --no-install-recommends doxygen doxygen-latex clang-tidy-11 bear
+        sudo apt-get install -y --no-install-recommends wget gpg
+        # Setup LLVM repository
+        sudo mkdir -p /etc/apt/keyrings
+        wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/llvm.gpg
+        echo "deb [signed-by=/etc/apt/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-${CLANG_VER} main" | sudo tee /etc/apt/sources.list.d/llvm.list
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends clang-tidy-${CLANG_VER} bear
+    - name: Resolve UCX HEAD commit
+      id: ucx-sha
+      run: echo "sha=$(git ls-remote ${OPEN_UCX_LINK} refs/heads/${OPEN_UCX_BRANCH} | cut -f1)" >> $GITHUB_OUTPUT
+    - name: Cache UCX
+      id: cache-ucx
+      uses: actions/cache@v4
+      with:
+        path: /tmp/ucx/install
+        key: ucx-tidy-${{ steps.ucx-sha.outputs.sha }}-${{ hashFiles('.github/workflows/clang-tidy.yaml') }}
     - name: Get UCX
-      run: git clone ${OPEN_UCX_LINK} -b ${OPEN_UCX_BRANCH} /tmp/ucx
+      if: steps.cache-ucx.outputs.cache-hit != 'true'
+      run: |
+        rm -rf /tmp/ucx
+        git clone --depth 1 ${OPEN_UCX_LINK} -b ${OPEN_UCX_BRANCH} /tmp/ucx
     - name: Build UCX
+      if: steps.cache-ucx.outputs.cache-hit != 'true'
       run: |
         cd /tmp/ucx && ./autogen.sh
-        ./contrib/configure-release --without-java --disable-numa --prefix $PWD/install
+        CC=clang-${CLANG_VER} CXX=clang++-${CLANG_VER} ./contrib/configure-release --without-java --without-go --disable-numa --prefix $PWD/install
         make -j install
-    - uses: actions/checkout@v1
+    - uses: actions/checkout@v6
     - name: Build UCC
       run: |
         ./autogen.sh
-        CC=clang-11 CXX=clang++-11 ./configure --prefix=/tmp/ucc/install --with-ucx=/tmp/ucx/install
-        bear --cdb /tmp/compile_commands.json make
+        CC=clang-${CLANG_VER} CXX=clang++-${CLANG_VER} ./configure --prefix=/tmp/ucc/install --with-ucx=/tmp/ucx/install --enable-assert
+        bear --output /tmp/compile_commands.json -- make -j
     - name: Run clang-tidy
       run: |
         echo "Workspace: ${GITHUB_WORKSPACE}"
         cd ${GITHUB_WORKSPACE}
-        run-clang-tidy-11 -p /tmp/
+        run-clang-tidy-${CLANG_VER} -p /tmp/ 2>&1 | tee /tmp/clang_tidy.log
+        nerrors=$(grep 'error:' /tmp/clang_tidy.log | wc -l)
+        if [ $nerrors -ne 0 ]; then
+            exit 125;
+        fi

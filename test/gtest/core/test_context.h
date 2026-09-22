@@ -1,11 +1,11 @@
 /**
- * Copyright (C) Mellanox Technologies Ltd. 2020.  ALL RIGHTS RESERVED.
+ * Copyright (c) 2020, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * See file LICENSE for terms.
  */
 
 #ifndef UCC_TEST_CONTEXT_H
 #define UCC_TEST_CONTEXT_H
-#include <common/test.h>
+#include <common/test_ucc.h>
 class test_context_config : public ucc::test
 {
 public:
@@ -24,5 +24,11 @@ public:
     ~test_context();
 };
 
+class test_context_get_attr : public test_context {
+  public:
+    ucc_context_h ctx_h;
+    test_context_get_attr();
+    ~test_context_get_attr();
+};
 
 #endif

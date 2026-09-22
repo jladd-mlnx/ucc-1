@@ -1,22 +1,32 @@
-name: Codestyle
+name: Lint (codestyle)
 
 on: [pull_request]
 
+concurrency:
+  group: lint-codestyle-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
-  GIT_CF: https://raw.githubusercontent.com/llvm/llvm-project/release/11.x/clang/tools/clang-format/git-clang-format
+  GIT_CF: https://raw.githubusercontent.com/llvm/llvm-project/release/21.x/clang/tools/clang-format/git-clang-format
+  CLANG_FORMAT_VERSION: "21.1.8"
+
 jobs:
   check-codestyle:
-    runs-on: ubuntu-latest
-    name: Check code style
+    runs-on: ubuntu-24.04
+    name: codestyle
+    defaults:
+      run:
+        shell: bash
     steps:
     - name: Install dependencies
       run: |
-        sudo apt-get update
-        sudo apt-get install -y --no-install-recommends wget lsb-core software-properties-common
-        sudo bash -c "$(wget -O - https://apt.llvm.org/llvm.sh)"
-        curl -OL $GIT_CF && chmod +x ./git-clang-format && sudo mv ./git-clang-format /usr/bin/git-clang-format
+        pipx install clang-format==${CLANG_FORMAT_VERSION}
+
+        curl -fsSL $GIT_CF -o git-clang-format
+        chmod +x ./git-clang-format
+        sudo mv ./git-clang-format /usr/bin/git-clang-format
     - name: Checking out repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@v6
       with:
         ref: ${{ github.event.pull_request.head.sha }}
         fetch-depth: 0
@@ -34,7 +44,9 @@ jobs:
               return 1
             fi
           fi
-          if ! echo $msg | grep -qP '^Merge |^((CODESTYLE|REVIEW|CORE|UTIL|TEST|API|DOCS|TOOLS|BUILD)|(CL/|TL/|UCP|UCG|BASIC))+: \w'
+          H1="CODESTYLE|REVIEW|CORE|UTIL|TEST|API|DOCS|TOOLS|BUILD|MC|EC|SCHEDULE|TOPO"
+          H2="CI|CL/|TL/|MC/|EC/|UCP|SHM|NCCL|SHARP|BASIC|HIER|DOCA_UROM|CUDA|CPU|EE|RCCL|ROCM|SELF|MLX5"
+          if ! echo $msg | grep -qP '^Merge |^'"(($H1)|($H2))"'+: \w'
           then
             echo "Wrong header"
             return 1
@@ -65,13 +77,18 @@ jobs:
         fi
     - name: Check code format
       run: |
-        set -eE
+        set -eEuo pipefail
         echo "Commit ${{ github.event.pull_request.base.sha }}"
-        diff=`git clang-format --style=file --diff ${{ github.event.pull_request.base.sha }}`
+        diff=`git-clang-format --binary=clang-format --style=file --diff ${{ github.event.pull_request.base.sha }}` || true
         if [ "$diff" = "no modified files to format" ] || [ "$diff" = "clang-format did not modify any files" ]
         then
           echo "Format check PASS"
         else
-          echo "Please check code format:"
+          echo "Format check FAILED"
+          echo ""
+          echo "Please format your code using:"
+          echo "  git-clang-format --binary=clang-format ${{ github.event.pull_request.base.sha }}"
+          echo ""
+          echo "Formatting differences:"
           echo "$diff"
         fi

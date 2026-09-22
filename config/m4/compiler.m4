@@ -1,5 +1,5 @@
 #
-# Copyright (C) Mellanox Technologies Ltd. 2001-2014.  ALL RIGHTS RESERVED.
+# Copyright (c) 2001-2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # Copyright (c) UT-Battelle, LLC. 2017. ALL RIGHTS RESERVED.
 # Copyright (C) ARM Ltd. 2016-2020.  ALL RIGHTS RESERVED.
 # See file LICENSE for terms.
@@ -9,7 +9,7 @@
 #
 # Initialize CFLAGS
 #
-BASE_CFLAGS="-g -Wall -Werror"
+BASE_CFLAGS="-Wall -Werror"
 
 
 #
@@ -32,38 +32,6 @@ AC_DEFUN([CHECK_CXX_COMP],
                             [AC_MSG_ERROR([Cannot continue. Please install C++ compiler.])])
           AC_LANG_POP([C++])
          ])
-
-
-#
-# Debug mode
-#
-AC_ARG_ENABLE(debug,
-        AC_HELP_STRING([--enable-debug], [Enable debug mode build]),
-        [],
-        [enable_debug=no])
-AS_IF([test "x$enable_debug" = xyes],
-        [BASE_CFLAGS="-D_DEBUG $BASE_CFLAGS"
-         BASE_CXXFLAGS="-D_DEBUG" $BASE_CXXFLAGS],
-        [])
-
-
-#
-# Optimization level
-#
-AC_ARG_ENABLE(compiler-opt,
-        AC_HELP_STRING([--enable-compiler-opt], [Set optimization level [0-3]]),
-        [],
-        [enable_compiler_opt="none"])
-AS_IF([test "x$enable_compiler_opt" = "xyes"], [BASE_CFLAGS="-O3 $BASE_CFLAGS"],
-      [test "x$enable_compiler_opt" = "xnone"],
-          [AS_IF([test "x$enable_debug" = xyes],
-                 [BASE_CFLAGS="-O0 $BASE_CFLAGS"
-                  BASE_CXXFLAGS="-O0 $BASE_CXXFLAGS"],
-                 [BASE_CFLAGS="-O3 $BASE_CFLAGS"
-                  BASE_CXXFLAGS="-O0 $BASE_CXXFLAGS"])],
-      [test "x$enable_compiler_opt" = "xno"], [],
-      [BASE_CFLAGS="-O$enable_compiler_opt $BASE_CFLAGS"])
-
 
 #
 # CHECK_CROSS_COMP (program, true-action, false-action)
@@ -90,7 +58,7 @@ AC_DEFUN([CHECK_SPECIFIC_ATTRIBUTE], [
         #
         # Try to compile using the C compiler
         #
-        AC_TRY_COMPILE([$3],[],
+        AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[$3]],[[]])],
                        [ucx_cv_attribute_[$1]=1],
                        [ucx_cv_attribute_[$1]=0])
 	CFLAGS="$SAVE_CFLAGS"
@@ -105,7 +73,7 @@ AC_DEFUN([CHECK_SPECIFIC_ATTRIBUTE], [
 #  Enable/disable turning on machine-specific optimizations
 #
 AC_ARG_ENABLE(optimizations,
-              AC_HELP_STRING([--enable-optimizations],
+              AS_HELP_STRING([--enable-optimizations],
                              [Enable non-portable machine-specific CPU optimizations, default: NO]),
               [],
               [enable_optimizations=no])
@@ -120,10 +88,10 @@ AC_ARG_ENABLE(optimizations,
 AC_DEFUN([COMPILER_CPU_OPTIMIZATION],
 [
     AC_ARG_WITH([$1],
-                [AC_HELP_STRING([--with-$1], [Use $2 compiler option.])],
+                [AS_HELP_STRING([--with-$1], [Use $2 compiler option.])],
                 [],
                 [with_$1=$enable_optimizations])
-   
+
     AS_IF([test "x$with_$1" != "xno"],
           [SAVE_CFLAGS="$CFLAGS"
            CFLAGS="$BASE_CFLAGS $CFLAGS $3"
@@ -150,15 +118,15 @@ AC_DEFUN([DETECT_UARCH],
     cpuarch=`grep 'CPU architecture' /proc/cpuinfo 2> /dev/null | cut -d: -f2 | tr -d " " | head -n 1`
     cpuvar=`grep 'CPU variant' /proc/cpuinfo 2> /dev/null | cut -d: -f2 | tr -d " " | head -n 1`
     cpupart=`grep 'CPU part' /proc/cpuinfo 2> /dev/null | cut -d: -f2 | tr -d " " | head -n 1`
-   
+
     ax_cpu=""
     ax_arch=""
-    
+
     AC_MSG_NOTICE(Detected CPU implementation: ${cpuimpl})
     AC_MSG_NOTICE(Detected CPU architecture: ${cpuarch})
     AC_MSG_NOTICE(Detected CPU variant: ${cpuvar})
     AC_MSG_NOTICE(Detected CPU part: ${cpupart})
-   
+
     case $cpuimpl in
       0x42) case $cpupart in
         0x516 | 0x0516)
@@ -194,7 +162,7 @@ AC_DEFUN([DETECT_UARCH],
         ;;
       *)
         ;;
-    esac 
+    esac
     AM_CONDITIONAL([HAVE_AARCH64_THUNDERX2], [test x$ax_cpu = xthunderx2t99])
     AM_CONDITIONAL([HAVE_AARCH64_THUNDERX1], [test x$ax_cpu = xthunderxt88])
     AM_CONDITIONAL([HAVE_AARCH64_HI1620], [test x$ax_cpu = xtsv110])
@@ -286,6 +254,11 @@ CHECK_COMPILER_FLAG([-diag-error 10006], [-diag-error 10006],
                     [BASE_CFLAGS="$BASE_CFLAGS -diag-error 10006"
                      BASE_CXXFLAGS="$BASE_CXXFLAGS -diag-error 10006"],
                     [])
+CHECK_COMPILER_FLAG([-diag-error 10148], [-diag-error 10148],
+                    [AC_LANG_SOURCE([[int main(int argc, char** argv){return 0;}]])],
+                    [BASE_CFLAGS="$BASE_CFLAGS -diag-error 10148"
+                     BASE_CXXFLAGS="$BASE_CXXFLAGS -diag-error 10148"],
+                    [])
 
 
 CHECK_DEPRECATED_DECL_FLAG([-diag-disable 1478], CFLAGS_NO_DEPRECATED) # icc
@@ -318,12 +291,12 @@ ADD_COMPILER_FLAG_IF_SUPPORTED([-diag-disable 269],
 # guarantee alignment for 16 bytes only. Force using compiler 16-bytes alignment
 # by default if option is supported.
 #
-UCC_ALLOC_ALIGN=16
-ADD_COMPILER_FLAG_IF_SUPPORTED([-fmax-type-align=$UCC_ALLOC_ALIGN],
-                               [-fmax-type-align=$UCC_ALLOC_ALIGN],
-                               [AC_LANG_SOURCE([[int main(int argc, char** argv){return 0;}]])],
-                               [AC_DEFINE_UNQUOTED([UCC_ALLOC_ALIGN], $UCC_ALLOC_ALIGN, [Set aligment assumption for compiler])],
-                               [])
+#UCC_ALLOC_ALIGN=16
+#ADD_COMPILER_FLAG_IF_SUPPORTED([-fmax-type-align=$UCC_ALLOC_ALIGN],
+#                               [-fmax-type-align=$UCC_ALLOC_ALIGN],
+#                               [AC_LANG_SOURCE([[int main(int argc, char** argv){return 0;}]])],
+#                               [AC_DEFINE_UNQUOTED([UCC_ALLOC_ALIGN], $UCC_ALLOC_ALIGN, [Set aligment assumption for compiler])],
+#                               [])
 
 
 #
@@ -361,9 +334,9 @@ AS_IF([test "x$ax_cpu" != "x"],
       ])
 
 
-# 
+#
 # Architecture tuning
-# 
+#
 AS_IF([test "x$ax_arch" != "x"],
       [COMPILER_CPU_OPTIMIZATION([march], [architecture tuning], [-march=$ax_arch],
                                  [int main(int argc, char** argv) { return 0;}])
@@ -472,12 +445,15 @@ AC_LANG_POP
 # --diag_suppress 1215 - Suppress deprecated API warning for PGI18 compiler
 # --diag_suppress 1901 - Use of a const variable in a constant expression is nonstandard in C
 # --diag_suppress 1902 - Use of a const variable in a constant expression is nonstandard in C (same as 1901)
+# --diag_suppress 301  - Suppress typedef name has already been declared (with same type) [duplicate_typedef]
+
 ADD_COMPILER_FLAGS_IF_SUPPORTED([[--display_error_number],
                                  [--diag_suppress 181],
                                  [--diag_suppress 381],
                                  [--diag_suppress 1215],
                                  [--diag_suppress 1901],
-                                 [--diag_suppress 1902]],
+                                 [--diag_suppress 1902],
+                                 [--diag_suppress 301]],
                                 [AC_LANG_SOURCE([[int main(int argc, char **argv){return 0;}]])])
 
 
@@ -495,7 +471,6 @@ CHECK_COMPILER_FLAG([-pedantic], [-pedantic],
 #
 ADD_COMPILER_FLAGS_IF_SUPPORTED([[-Wno-missing-field-initializers],
                                  [-Wno-unused-parameter],
-                                 [-Wno-unused-label],
                                  [-Wno-long-long],
                                  [-Wno-endif-labels],
                                  [-Wno-sign-compare],
@@ -517,9 +492,9 @@ BASE_CXXFLAGS="$BASE_CFLAGS"
 #
 ADD_COMPILER_FLAGS_IF_SUPPORTED([[-Wno-pointer-sign],
                                  [-Werror-implicit-function-declaration],
-                                 [-Wno-format-zero-length],
                                  [-Wnested-externs],
-                                 [-Wshadow]],
+                                 [-Wshadow],
+                                 [-Wenum-conversion]],
                                 [AC_LANG_SOURCE([[int main(int argc, char **argv){return 0;}]])])
 
 
@@ -536,3 +511,32 @@ BASE_CPPFLAGS="$BASE_CPPFLAGS -I\${abs_top_srcdir}/src"
 BASE_CPPFLAGS="$BASE_CPPFLAGS -I\${abs_top_builddir}"
 BASE_CPPFLAGS="$BASE_CPPFLAGS -I\${abs_top_builddir}/src"
 AC_SUBST([BASE_CPPFLAGS], [$BASE_CPPFLAGS])
+
+AC_C_BIGENDIAN(
+           [AC_DEFINE([UCC_BIG_ENDIAN],[1],[Words are stored with the most significant byte first])],
+           [AC_DEFINE([UCC_BIG_ENDIAN],[0],[Words are stored with the most significant byte first])],
+           [],
+           [AC_MSG_ERROR([Universal Endian],[1])])
+
+#
+# Check for C++17 support
+#
+AC_MSG_CHECKING([c++17 support])
+AC_LANG_PUSH([C++])
+SAVE_CXXFLAGS="$CXXFLAGS"
+CXX17FLAGS="-std=c++17"
+CXXFLAGS="$CXXFLAGS $CXX17FLAGS"
+AC_COMPILE_IFELSE([AC_LANG_SOURCE([[#include <iostream>
+					#include <string>
+					int main(int argc, char** argv) {
+						std::to_string(1);
+						return 0;
+					} ]])],
+                  [AC_MSG_RESULT([yes])
+                   AC_SUBST([CXX17FLAGS])
+                   cxx17_happy=yes],
+                  [AC_MSG_RESULT([no])
+                   cxx17_happy=no])
+CXXFLAGS="$SAVE_CXXFLAGS"
+AC_LANG_POP
+AM_CONDITIONAL([HAVE_CXX17], [test "x$cxx17_happy" != xno])

@@ -1,0 +1,581 @@
+/**
+ * @copyright (c) 2021, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *
+ * See file LICENSE for terms.
+ */
+
+## Current
+
+## New Features and Enhancements
+
+### Core
+- Resolved NVML fabric symbols lazily {PR #1305}
+- Various fixes for ucc_mem_map {PR #1306}
+- Fixed mranged parameters parser {PR #1319}
+- Fixed service team error path {PR #1324}
+- Added UCC_MODULES configuration {PR #1275}
+- Exchanged CPU vendor and model in topology {PR #1330}
+- Fixed ring build {PR #1333}
+
+### CL/HIER
+- Disabled active set in 2step bcast {PR #1331}
+
+### TL/CUDA
+- Fixed NVLS on fabric cluster UUID {PR #1308}
+- Fixed NVLS fallback and EC persistent hangs {PR #1320}
+
+### TL/UCP
+- Fixed single rank registration {PR #1325}
+
+### TL/MLX5
+- Fixed inet_ntop argument for IPv6 address {PR #1294}
+
+### TL/NCCL
+- Exit nccl context create when no active CUDA context {PR #1332}
+
+### Build and Test
+- Added Slurm-based UCC MPI + DLRM test job {PR #1318}
+- Triggered CI triage agent on build failure {PR #1329}
+
+### Tools
+- Stop perftest after argument parse errors {PR #1322}
+- Initialize perftest default generator {PR #1323}
+- Added selectable iteration cadence {PR #1326}
+
+## 1.8.0 (June 3rd, 2026)
+
+## New Features and Enhancements
+
+### Core
+- Added collective checker function {PR #1292}
+- Added FUJITSU-MONAKA CPU support {PR #1257}
+- Moved CUDA topology to core {PR #1261}
+- Fixed task restart in pipelined schedule {PR #1262}
+
+### TL/CUDA
+- Added INT32, INT64, UINT32, UINT64 support for NVLS {PR #1259}
+- Fixed alltoall(v) race {PR #1268}
+- NVLS and topology robustness improvements {PR #1287}
+- Multinode cleanup fixes {PR #1295}
+- Linked libstdc++ for aarch64 {PR #1296}
+- NVLS allreduce small buffers {PR #1304}
+- Fixed NVLS alignment {PR #1312}
+- Enabled NVLS build by default {PR #1200}
+- Fixed NVLS arch {PR #1264}
+
+### TL/UCP
+- Added allreduce ring algorithm {PR #1258}
+
+### EC/CUDA
+- Reduced compilation time {PR #1265}
+
+### Build and Test
+- Enhanced NVLS tests {PR #1269}
+- Bumped version to v1.8 {PR #1276}
+- Fixed SLURM job release in onfail/always {PR #1282}
+- Moved CI gtest builds to Slurm {PR #1280}
+- Changed OMPI to Mellanox fork in CI {PR #1286}
+- Aborted old builds {PR #1285}
+- Optimized GHA workflow and builds {PR #1281}
+- Applied Blossom CI hot fix {PR #1289}
+- Bumped version to v1.9 {PR #1297}
+- Increased max line length for ini files {PR #1316}
+- Fixed ini max file line length {PR #1317}
+- Improved ucc MPI tests to check IP exists {PR #1263}
+- Updated NVLS tests timeout logic {PR #1266}
+- Ran Coverity in container {PR #1267}
+- Disabled hanging ctx team tests {PR #1273}
+
+### Tools
+- Shuffled columns in perftest traffic matrix generator {PR #1251}
+
+## 1.7.0 (March 7th, 2026)
+
+## New Features and Enhancements
+
+### Core
+- Ported UCS logger from libucs to UCC, enabling file filtering and log-to-file features {PR #1191}
+
+### TL/CUDA
+- Added multinode NVLS support using CUDA fabric handles for cross-node allreduce {PR #1185}
+- Added NVLS reduce_scatterv with BF16 datatype support and kernel-based synchronization {PR #1211}
+- Added ptrace permissions for NVLS POSIX handle sharing via pidfd_getfd {PR #1218}
+- Added NVLS allgatherv using multimem.st instructions with 16-byte alignment {PR #1240}
+
+### TL/UCP
+- Added memory type parameter to tl_ucp_put/get for GPU memory in onesided collectives {PR #1253}
+- Fixed crashes in inplace mode for allgather, alltoall, and alltoallv {PR #1254}
+- Fixed onesided alltoall algorithm selection to default to PUT for 1 PPN {PR #1247}
+
+### TL/NCCL
+- Added native ncclAlltoAll support for NCCL 2.28.3+ {PR #1244}
+
+### Build and Test
+- Bumped version to v1.7 {PR #1225}
+- Updated clang-format rules for function wrapping and comment reflow {PR #1192}
+- Added Greptile AI code review configuration {PR #1208}
+- Improved configure status reporting for CUDA/NVML detection {PR #1239}
+- Fixed m4 configuration syntax for CUDA {PR #1252}
+- Fixed uninitialized variable warning in MLX5 UMR WQE test {PR #1195}
+- Added multinode NVLS tests on GB300 Slurm clusters {PR #1235}
+- Added timeout to MPI and DLRM tests to prevent hung jobs {PR #1226}
+- Added 90-minute timeout to torch UCC tests {PR #1204}
+- Added Blossom CI Jenkins dispatcher job for /build trigger {PR #1229}
+- Added GitHub Action workflow for Blossom pipeline initialization {PR #1227}
+- Migrated Jenkins credentials to swx-hpcx service account for SSH key rotation {PR #1233}
+- Added separate GitHub UI checks for each Jenkins job via Blossom {PR #1237}
+- Added Blossom CI separated checks and job output upload to GitHub {PR #1238}
+- Fixed Jenkins job folder name and email in CI configuration {PR #1236}
+- Fixed clang-format command to use git-clang-format-21 for Ubuntu 22.04 {PR #1212}
+- Migrated hpcsdk build from GitHub workflow to Jenkins + CI-DEMO {PR #1215}
+- Set Coverity aggressiveness level to medium for better issue detection {PR #1207}
+- Fixed parallel GPU tests with CUDA context creation and IB port validation {PR #1209}
+- Enabled parallel UCC test execution in CI {PR #1206}
+- Fixed Jenkins JJB YAML variable syntax for check separation {PR #1246}
+
+### Documentation
+- Fixed various typos throughout comments and outputs {PR #1228}
+
+### Tools
+- Added matrix generator for alltoallv traffic patterns (uniform, biased, random) {PR #1220}
+- Fixed segfault in scatterv perftest inplace mode due to early memory free {PR #1234}
+- Optimized perftest traffic matrix to reuse displacements for same-size messages {PR #1250}
+
+## 1.6.0 (November 14th, 2025)
+
+## New Features and Enhancements
+
+### Core
+- Added UCC_DEBUGGER_WAIT environment variable {PR #1130}
+
+### CL/HIER
+- Fixed Wlto-type-mismatch {PR #1179}
+
+### TL/CUDA
+- Fixed printing of device PCI id {PR #1053}
+- Added NVLS improvements and bfloat16 data type support {PR #1162}
+- Added NVLS barrier {PR #1180}
+- Added Alltoall(v) copy engine {PR #1138}
+
+### TL/UCP
+- Removed a debug print statement {PR #1177}
+- Added knomial allgather with mapped buffers {PR #1176}
+- Added node local id config {PR #1189}
+- Enable knomial allgatherv {PR #1188}
+- Added congestion avoidant onesided Alltoall {PR #1096}
+
+### EC/CUDA
+- Fixed cuctx creation in EC CUDA {PR #1219}
+
+### Build and Test
+- Added check to see if target exists in CMAKE {PR #1173}
+- Fixed build with GCC 14 {PR #1190}
+- Added gtest and mpi test for ucc_mem_map and ucc_mem_unmap {PR #1165}
+- Check for CX7 in wait_on_data gtest {PR #1127}
+
+### Tools
+- Updated perftest to print BusBW {PR #1186}
+- Added support for onesided alltoall in perftest {PR #1194}
+- Added CUDA managed memory type to ucc_perftest {PR #1199}
+- Fixes for onesided alltoall in perftest {PR #1216}
+
+## 1.5.0 (July 31st, 2025)
+
+## New Features and Enhancements
+
+### Core
+- Enhanced error logs in context creation {PR #1135}
+- Added ucc net devices configuration {PR #1141}
+- Enhanced error logging in collective initialization {PR #1104}
+- Added support for ucc_mem_map and ucc_mem_unmap {PR #1070}
+
+### CL/HIER
+- Added flag for nonroot info {PR #1123}
+- Removed per node leader, fixed double free {PR #1126}
+
+### TL/UCP
+- Fixed allreduce knomial data consistency {PR #1145}
+- Fixed allgather oneshot {PR #1134}
+- Added allgather linear implementation {PR #1122}
+- Added fallback if memh not passed {PR #1136}
+
+### TL/MLX5
+- Added CUDA support for zero-copy multicast {PR #1118}
+- Added configuration to set IB QP SL {PR #1057}
+- Fixed segfault in multicast team creation {PR #1150}
+- Recovered from IPoIB issue in multicast init {PR #1140}
+- Added HCA-assisted copy & CUDA scratch design {PR #1154}
+- Added logging for multicast FORCE/TRY modes {PR #1156}
+- Fixed reliability initialization after multicast setup {PR #1163}
+- Added global status check {PR #1113}
+
+### TL/CUDA
+- Added NVLink SHARP (NVLS) Allreduce {PR #1148}
+- Added topology cache {PR #1137}
+- Added NVLink SHARP (NVLS) Reduce Scatter {PR #1144}
+
+### EC/CUDA
+- Linked with stdc++ {PR #1168}
+
+### EC/ROCM
+- Included stdbool.h for new versions of ROCm {PR #1146}
+
+### Build and Test
+- Updated CUDA architecture {PR #1143}
+- Changed to CUDA 12.9 {PR #1155}
+- Fixed coverity issues {PR #1152}
+- Added buffers for onesided tests {PR #1100}
+- Added missing progress calls {PR #1151}
+
+### Documentation
+- Updated component image 1.4.4 {PR #1153}
+
+### Tools
+- Added perftest generator {PR #1147}
+
+## 1.4.4 (April 25th, 2025)
+
+## New Features and Enhancements
+
+### Core
+- Implemented asymmetric memory support {PR #1000}
+- Enhanced error handling and resource cleanup {PR #960, #951}
+- Improved service team handling {PR #1046}
+- Fixed triggered post for zero size collectives {PR #960}
+
+### CL/HIER
+- Added allgatherv support {PR #1111}
+- Implemented node subgroup unpacking {PR #1103}
+- Added reduce to supported collectives {PR #997}
+- Fixed integer overflow in alltoall {PR #944}
+
+### TL/UCP
+- Split single and multithreaded send/receive operations {PR #1109}
+- Added knomial allgather with CUDA memory support {PR #1095}
+- Implemented reduce SRG knomial algorithm {PR #1058}
+- Added radix selection to knomial operations {PR #1072}
+- Added sliding window allreduce implementation {PR #958}
+- Added knomial allgatherv support {PR #1008}
+- Added sparbit algorithm for allgather {PR #940}
+- Extended broadcast active set support for size > 2 {PR #926}
+- Added knomial algorithm for reduce-scatter {PR #970}
+
+### TL/MLX5
+- Added multicast-based zero-copy broadcast {PR #1087}
+- Implemented mcast multi-group support {PR #1060}
+- Added non-blocking CUDA memory copy support {PR #1040}
+- Added device memory multicast broadcast {PR #989}
+- Enhanced mcast allgather staging-based algorithm {PR #994}
+- Improved one-sided mcast reliability initialization {PR #980}
+- Various performance optimizations in alltoall {PR #1067}
+- Fixed fences in all-to-all WQEs {PR #1069}
+- Added context option to disable all-to-all operations {PR #1062}
+- Improved error handling and device checks {PR #1102}
+- Disabled mcast for thread multiple mode {PR #961}
+
+### TL/SHARP
+- Added support for allgather operation {PR #1081}
+- Enabled reduce-scatter with SAT support {PR #1084}
+- Added SHARP multi-channel support {PR #1049}
+- Fixed service team OOB handling {PR #1001}
+- Improved internal OOB usage {PR #986}
+
+### CUDA
+- Added linear broadcast implementation {PR #948}
+- Batch CUDA stream memory operations, reduced CPU and GPU execution overhead {PR #1093}
+- Enhanced error handling for CUDA context operations {PR #1025}
+- Fixed context cleanup in CUDA operations {PR #954}
+
+### Build and Test
+- Added support for specific GPU architectures with ROCM {PR #987}
+- Added UCC pkg-config support {PR #1036}
+- Fixed build compatibility with NVC compiler {PR #1052}
+- Enhanced config parser functionality {PR #1092}
+- Enhanced ASAN/LSAN memory leak detection {PR #1074}
+- Added error checking and exit handling in gtests {PR #1083}
+
+### Documentation
+- Updated README with UCC publication information {PR #1028}
+- Added DOCA_UROM documentation {PR #999}
+- Fixed Doxygen documentation issues {PR #1038}
+- Enhanced code style consistency {PR #1020}
+
+### CL/DOCA_UROM
+- Implemented new DOCA UROM plugin {PR #978}
+- Added support for offloading collective operations to DPUs
+- Implemented allreduce collective
+
+## 1.3.0 (April 18th, 2024)
+
+## New Features and Enhancements
+
+### CL/HIER
+- Disable onesided alltoallv {PR #875}
+
+### TL/CUDA
+- Initialize remote CUDA scratch to NULL {PR #911}
+
+
+### TL/UCP
+- Enable hybrid alltoallv {PR #781}
+- Avoid copy in knomial scatter {PR #771}
+- Enable reorder ranks to reduce_scatter, Knomial Allreduce, Ring Allgather/v {PR #819}
+- Remove memcpy in last SRA step {PR #743}
+- Fix sparse pack in hybrid a2av {PR #825}
+- Fix recycle in hybrid a2av {PR #827}
+- Reorder ranks for SRA {PR #834}
+- Use ring allgather when reordering needed {PR #879}
+- Use pipelining in SRA allreduce for CUDA {PR #873}
+- Poll for onesided alltoall completion {PR #876}
+- Add support for non-host buffers in bruck alltoall {PR #852}
+- Added Neighbor Exchange Allgather{PR #822}
+
+### TL/SHARP
+- Enable bcast for any predefined dt {PR #774}
+- Don't print team create error {PR #777}
+- Check datasize supported {PR #776}
+- Fix sharp context cleanup {PR #843}
+
+### API
+- Remove duplicate get_version_string {PR #933}
+
+### TL/NCCL
+- Make team init non-blocking {PR #772}
+- Add CUDA managed to score {PR #793}
+- Make ncclGroupEnd nb {PR #798}
+- Lazy init nccl comm {PR #851}
+
+### TL/MLX5
+- Share ib_ctx and pd {PR #749}
+- Rcache {PR #753}
+- Device memory and topo init {PR #780}
+- Adding mcast interface {PR #784}
+- A2A part 1 -- coll init {PR #790}
+- A2A part 2 -- full collective {PR #802}
+- Revisit team and ctx init {PR #815}
+- Fix context create hang {PR #887}
+- Add librdmacm linkage {PR #910}
+
+### CORE
+- Fix score update when only score given {PR #779}
+- Coverity fixes {PR #809}
+- Additional coverty fixes {PR #813}
+- Fix error handling for ctx create epilog {PR #818}
+- Skip zero size collectives {PR #787}
+
+### DOCS
+- Updating NEWS for v1.2 {PR #791}
+- Updating NEWS for v1.3 {PR #937}
+
+### BUILD and TEST
+- Updated build system to enable UCC with ROCm 6.x {PR #906 and #917}
+- Check op and dt compatibility {PR #773}
+- Fix barrier test {PR #799}
+- Propagate HIP_CXXFLAGS to gtest and mpi {PR #803}
+
+
+
+## 1.2.0 (June 6th, 2023)
+
+## New Features and Enhancements
+
+## CL/HIER
+
+- Fixed single proc on node issue in alltoall ([#658](https://github.com/openucx/ucc/pull/658))
+- Implemented allreduce rab pipelined ([#608](https://github.com/openucx/ucc/pull/608))
+- Added bcast 2step algorithm ([#620](https://github.com/openucx/ucc/pull/620))
+- Fixed allreduce rab pipeline ([#759](https://github.com/openucx/ucc/pull/759))
+
+##  TL/CUDA
+
+- Support for CUDA 12
+- Fixed cache unmap issue ([#642](https://github.com/openucx/ucc/pull/642))
+- Implemented reduce scatter linear ([#669](https://github.com/openucx/ucc/pull/669))
+- Added algorithm selection based on topology ([#688](https://github.com/openucx/ucc/pull/688))
+- Fixed linear algorithms ([#751](https://github.com/openucx/ucc/pull/751))
+- Fixed pipelining in linear rs ([#770](https://github.com/openucx/ucc/pull/770))
+
+## TL/UCP
+
+- Added special service worker ([#560](https://github.com/openucx/ucc/pull/560))
+- Added scatterv ([#663](https://github.com/openucx/ucc/pull/663))
+- Added gatherv ([#664](https://github.com/openucx/ucc/pull/664))
+- Fixed running with npolls 0 ([#695](https://github.com/openucx/ucc/pull/695))
+- Added knomial allgather ([#729](https://github.com/openucx/ucc/pull/729))
+- Fixed bug for triggered colls ([#757](https://github.com/openucx/ucc/pull/757))
+- Added bruck alltoall ([#756](https://github.com/openucx/ucc/pull/756))
+- Added SLOAV alltoallv ([#687](https://github.com/openucx/ucc/pull/687))
+- Large message broadcast optimizations ([#738](https://github.com/openucx/ucc/pull/738))
+- Ranks reordering in ring allgather for better locality([#69](https://github.com/openucx/ucc/pull/698))
+
+##  TL/SHARP
+
+- Fixed memory type check in allreduce ([#662](https://github.com/openucx/ucc/pull/662))
+- Added support for sharpv3 dt ([#661](https://github.com/openucx/ucc/pull/661))
+- Fixed assert check ([#686](https://github.com/openucx/ucc/pull/686))
+- Implemented SHARP OOB fixes ([#746](https://github.com/openucx/ucc/pull/746))
+- Fixed local rank when NODE SBGP not enabled ([#760](https://github.com/openucx/ucc/pull/760))
+- Prevented sharp team with team max ppn > 1 ([#761](https://github.com/openucx/ucc/pull/761))
+
+
+## CORE
+
+- Fixed memory type score update ([#650](https://github.com/openucx/ucc/pull/650))
+- Fixed ucc parser build ([#666](https://github.com/openucx/ucc/pull/666))
+- Implemented ucc_pipeline_params ([#675](https://github.com/openucx/ucc/pull/675))
+- Changed log level of config_modify ([#667](https://github.com/openucx/ucc/pull/667))
+- Fixed timeout handle for triggered post ([#679](https://github.com/openucx/ucc/pull/679))
+
+## DOCS
+- Added User Guide ([#720](https://github.com/openucx/ucc/pull/720))
+
+
+## 1.1.0 (October 7th, 2022)
+
+## Features
+
+## API
+- Added float 128 and float 32, 64, 128 (complex) data types
+- Added Active Sets based collectives to support dynamic groups as well as
+  point-to-point messaging
+- Added ucc_team_get_attr interface
+
+## Core
+- Config file support
+- Fixed component search
+
+## CL
+
+- Added split rail allreduce collective implementation
+- Enable hierarchical alltoallv and barrier
+- Fixed cleanup bugs
+
+
+## TL
+- Added SELF TL supporting team size one
+
+### UCP
+
+- Added service broadcast
+- Added reduce_scatterv ring algorithm
+- Added k-nomial based gather collective implementation
+- Added one-sided get based algorithms
+
+### SHARP
+- Fixed SHARP OOB
+- Added SHARP broadcast
+
+
+
+### GPU Collectives (CUDA, NCCL TL and RCCL TL)
+- Added support for CUDA TL (intranode collectives for NVIDIA GPUs)
+- Added multiring allgatherv, alltoall, reduce-scatter, and reduce-scatterv
+  multiring in CUDA TL
+- Added topo based ring construction in CUDA TL to maximize bandwidth
+- Added NCCL gather, scatter and its vector variant
+- Enable using multiple streams for collectives
+- Added support for RCCL gather (v), scatter (v), broadcast, allgather (v),
+  barrier, alltoall (v) and all reduce collectives
+- Added ROCm memory component
+- Adapted all GPU collectives to executor design
+
+
+### Tests
+- Added tests for triggered collectives in perftests
+- Fixed bugs in multi-threading tests
+
+### Utils
+- Added CPU model and vendor detection
+- Several bug fixes in all components
+
+## 1.0.0 (April 19th, 2022)
+
+### Features
+
+#### API
+- Added Avg reduce operation
+- Added nonblocking team destroy option
+- Added user-defined datatype definitions
+- Added Bfloat16 type
+- Clarify semantics of core abstractions including teams and context
+- Added timeout option
+
+#### Core
+- Added coll scoring and selection support
+- Added support for Triggered collectives
+- Added support for timeouts in collectives
+- Added support for team create without ep in post
+- Added support for multithreaded context progress
+- Added support for nonblocking team destroy
+
+#### CL
+
+- Added support for hierarchical collectives
+- Added support for hierarchical allreduce collective operation
+- Added support for collectives based on one-sided communication routines
+
+
+#### TL
+- Added SHARP TL
+
+##### UCP
+
+- Added Bcast SAG algorithm for large messages
+- Added Knomial based reduce algorithm
+- Making allgather and alltoall agree with the API
+- Added SRA knomial allreduce algorithm
+- Added pairwise alltoall and alltoallv algorithms
+- Added allgather and allgatherv ring algorithms
+- Added support for collective operations based on one-sided semantics
+- Added support for alltoall with one-sided transfer semantics
+- Bug fixes
+
+##### SHARP
+- Added support for switch based hardware collectives (SHARP)
+
+#### NCCL
+- Add support for NCCL allreduce, alltoall, alltoallv, barrier, reduce, reduce
+  scatter, bcast, allgather and allgatherv
+
+#### Tests
+- Updated tests to test the newly added algorithms and operations
+
+
+## 0.1.0 (TBD)
+
+### Features
+
+#### API
+- UCC API to support library, contexts, teams, collective operations, execution
+  engine, memory types, and triggered operations
+
+#### Core
+- Added implementation for UCC abstractions - library, context, team,
+  collective operations, execution engine, memory types, and triggered
+  operations
+- Added support for memory types - CUDA, and CPU
+- Added support for configuring UCC library and contexts
+
+
+#### CL
+
+- Added support for collectives, while the source and destination is either in
+  CPU or device (GPU)
+- Added support for UCC_THREAD_MULTIPLE
+- Added support for CUDA stream-based collectives
+
+
+#### TL
+
+- Added support for send/receive based collectives using UCX/UCP as a transport
+  layer
+- Support for basic collectives types including barrier, alltoall, alltoallv,
+  broadcast, allgather, allgatherv, allreduce was added in the UCP TL
+- Added support using NCCL as a transport layer
+- Support for collectives types including alltoall, alltoallv, allgather,
+  allgatherv, allreduce, and broadcast
+
+#### Tests
+
+- Added support for unit testing (gtest) infrastructure
+- Added support for MPI tests

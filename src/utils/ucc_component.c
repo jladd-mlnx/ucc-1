@@ -1,12 +1,14 @@
 /**
- * Copyright (C) Mellanox Technologies Ltd. 2020.  ALL RIGHTS RESERVED.
+ * Copyright (c) 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * See file LICENSE for terms.
  */
 #include "config.h"
 #include "ucc_malloc.h"
 #include "ucc_component.h"
 #include "ucc_log.h"
+#include "ucc_math.h"
 #include "core/ucc_global_opts.h"
+#include "utils/ucc_string.h"
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -20,6 +22,72 @@
 #define IFACE_NAME_LEN_MAX                                                     \
     (UCC_MAX_FRAMEWORK_NAME_LEN + UCC_MAX_COMPONENT_NAME_LEN + 32)
 
+/* Check if a module name from the allow list matches the given component.
+   Entries with a framework prefix are matched as <framework>_<component>
+   (e.g. "tl_cuda"), entries without a known framework prefix are matched
+   against the component name only (e.g. "cuda" matches cuda in any
+   framework). */
+static int ucc_modules_list_search(const ucc_config_names_array_t *names,
+                                   const char *framework_name,
+                                   const char *component_name)
+{
+    char     qualified[UCC_MAX_FRAMEWORK_NAME_LEN +
+                       UCC_MAX_COMPONENT_NAME_LEN + 2];
+    unsigned i;
+
+    ucc_snprintf_safe(qualified, sizeof(qualified), "%s_%s",
+                      framework_name, component_name);
+
+    for (i = 0; i < names->count; i++) {
+        if ((strcmp(names->names[i], qualified) == 0) ||
+            (strcmp(names->names[i], component_name) == 0)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* Returns 1 if the allow list has at least one qualified entry targeting
+   this framework (e.g. "tl_ucp" targets "tl"). Bare names like "ucp" do
+   not target any specific framework, so ALLOW mode ignores frameworks
+   that have no qualified entries — preventing required frameworks (cl, mc)
+   from being accidentally excluded when the user writes e.g. "tl_ucp". */
+static int ucc_framework_is_targeted(const ucc_config_names_array_t *names,
+                                     const char *framework_name)
+{
+    char     prefix[UCC_MAX_FRAMEWORK_NAME_LEN + 2];
+    unsigned i;
+
+    ucc_snprintf_safe(prefix, sizeof(prefix), "%s_", framework_name);
+    for (i = 0; i < names->count; i++) {
+        if (strncmp(names->names[i], prefix, strlen(prefix)) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int ucc_component_is_enabled(const char *framework_name,
+                                    const char *component_name)
+{
+    ucc_config_allow_list_t *modules = &ucc_global_config.modules;
+    int                      found;
+
+    if (modules->mode == UCC_CONFIG_ALLOW_LIST_ALLOW_ALL) {
+        return 1;
+    }
+
+    found = ucc_modules_list_search(&modules->array, framework_name,
+                                    component_name) >= 0;
+    if (modules->mode == UCC_CONFIG_ALLOW_LIST_ALLOW) {
+        if (!ucc_framework_is_targeted(&modules->array, framework_name)) {
+            return 1;
+        }
+        return found;
+    }
+    return !found; /* NEGATE mode */
+}
+
 static ucc_status_t ucc_component_load_one(const char *so_path,
                                            const char *framework_name,
                                            ucc_component_iface_t **c_iface)
@@ -28,12 +96,14 @@ static ucc_status_t ucc_component_load_one(const char *so_path,
     char                  *error, iface_struct[IFACE_NAME_LEN_MAX];
     void                  *handle;
     ucc_component_iface_t *iface;
-    size_t                 basename_start, iface_struct_name_len;
+    ptrdiff_t              basename_start;
+    size_t                 iface_struct_name_len;
 
     ucc_snprintf_safe(framework_pattern, sizeof(framework_pattern), "ucc_%s_",
                       framework_name);
     basename_start =
-        ((ptrdiff_t)strstr(so_path, framework_pattern) - (ptrdiff_t)so_path);
+        ((ptrdiff_t)ucc_strstr_last(so_path, framework_pattern) -
+         (ptrdiff_t)so_path);
     if (basename_start < 0) {
         return UCC_ERR_NO_MESSAGE;
     }
@@ -46,9 +116,19 @@ static ucc_status_t ucc_component_load_one(const char *so_path,
     ucc_strncpy_safe(iface_struct, so_path + basename_start,
                      iface_struct_name_len + 1);
 
+    if (!ucc_component_is_enabled(framework_name,
+                                  iface_struct + strlen(framework_pattern))) {
+        ucc_debug("component '%s_%s' is disabled by UCC_MODULES configuration",
+                  framework_name, iface_struct + strlen(framework_pattern));
+        *c_iface = NULL;
+        return UCC_OK;
+    }
+
     handle = dlopen(so_path, RTLD_LAZY);
     if (!handle) {
-        ucc_debug("failed to load UCC component library: %s", so_path);
+        error = dlerror();
+        ucc_debug("failed to load UCC component library: %s (%s)",
+                  so_path, error);
         goto error;
     }
     iface = (ucc_component_iface_t *)dlsym(handle, iface_struct);
@@ -62,6 +142,7 @@ static ucc_status_t ucc_component_load_one(const char *so_path,
         goto iface_error;
     }
     iface->dl_handle = handle;
+    iface->id        = ucc_str_hash_djb2(iface->name);
     (*c_iface)       = iface;
     return UCC_OK;
 
@@ -70,6 +151,37 @@ iface_error:
 error:
     *c_iface = NULL;
     return UCC_ERR_NO_MESSAGE;
+}
+
+#define CHECK_COMPONENT_UNIQ(_framework, _field)                               \
+    do {                                                                       \
+        ucc_component_iface_t **c = _framework->components;                    \
+        int                     i, j;                                          \
+        for (i = 0; i < framework->n_components; i++) {                        \
+            for (j = i + 1; j < framework->n_components; j++) {                \
+                if (c[i]->_field == c[j]->_field) {                            \
+                    ucc_error("components %s and %s have the same "            \
+                              "default " UCC_PP_MAKE_STRING(_field) " %lu",    \
+                              c[i]->name, c[j]->name,                          \
+                              (unsigned long)c[i]->_field);                    \
+                    return UCC_ERR_INVALID_PARAM;                              \
+                }                                                              \
+            }                                                                  \
+        }                                                                      \
+    } while (0)
+
+ucc_status_t
+ucc_component_check_scores_uniq(ucc_component_framework_t *framework)
+{
+    CHECK_COMPONENT_UNIQ(framework, score);
+    return UCC_OK;
+}
+
+static ucc_status_t
+ucc_component_check_ids_uniq(ucc_component_framework_t *framework)
+{
+    CHECK_COMPONENT_UNIQ(framework, id);
+    return UCC_OK;
 }
 
 ucc_status_t ucc_components_load(const char *framework_name,
@@ -118,28 +230,75 @@ ucc_status_t ucc_components_load(const char *framework_name,
     for (i = 0; i < globbuf.gl_pathc; i++) {
         status = ucc_component_load_one(globbuf.gl_pathv[i], framework_name,
                                         &ifaces[n_loaded]);
-        if (status != UCC_OK) {
+        if (status != UCC_OK || ifaces[n_loaded] == NULL) {
             continue;
         }
         n_loaded++;
     }
 
+    assert(n_loaded <= globbuf.gl_pathc);
     if (globbuf.gl_pathc > 0) {
         globfree(&globbuf);
     }
-    if (n_loaded) {
-        assert(n_loaded <= globbuf.gl_pathc);
-        ifaces = ucc_realloc(ifaces, n_loaded * sizeof(ucc_component_iface_t *),
-                             "ifaces");
-        framework->components   = ifaces;
-        framework->n_components = n_loaded;
-        return UCC_OK;
-    } else {
+    if (!n_loaded) {
         if (ifaces) {
             ucc_free(ifaces);
         }
         return UCC_ERR_NOT_FOUND;
     }
+
+    ifaces = ucc_realloc(ifaces, n_loaded * sizeof(ucc_component_iface_t *),
+                         "ifaces");
+    framework->components   = ifaces;
+    framework->n_components = n_loaded;
+    if (UCC_OK != ucc_component_check_ids_uniq(framework)) {
+        /* This can only happen when the new component is added
+           (potentially as a plugin - black box) and its name hash
+           will produce collision with some other component.
+           This has nearly 0 probability and must be resolved by
+           the component developer via just a rename of a component. */
+        ucc_error("all components of a framwork must have uniq name hash");
+        status = UCC_ERR_INVALID_PARAM;
+        goto err;
+    }
+
+    framework->names.names =
+        ucc_malloc(sizeof(char *) * n_loaded, "components_names");
+    if (!framework->names.names) {
+        ucc_error("failed to allocate %zd bytes for components names",
+                  sizeof(char *) * n_loaded);
+        status = UCC_ERR_NO_MEMORY;
+        goto err;
+    }
+    framework->names.count = n_loaded;
+    for (i = 0; i < n_loaded; i++) {
+        framework->names.names[i] = strdup(framework->components[i]->name);
+    }
+
+    /* Warn about qualified allow-list entries that matched no component in
+       this framework — most likely a typo in UCC_MODULES. */
+    if (ucc_global_config.modules.mode != UCC_CONFIG_ALLOW_LIST_ALLOW_ALL) {
+        const ucc_config_names_array_t *mnames = &ucc_global_config.modules.array;
+        char prefix[UCC_MAX_FRAMEWORK_NAME_LEN + 2];
+
+        ucc_snprintf_safe(prefix, sizeof(prefix), "%s_", framework_name);
+        for (i = 0; i < (int)mnames->count; i++) {
+            if (strncmp(mnames->names[i], prefix, strlen(prefix)) != 0) {
+                continue;
+            }
+            /* This entry targets our framework; check if it matched anything. */
+            if (ucc_modules_list_search(&framework->names, framework_name,
+                                        mnames->names[i] + strlen(prefix)) < 0) {
+                ucc_warn("UCC_MODULES entry '%s' did not match any component "
+                         "in framework '%s'", mnames->names[i], framework_name);
+            }
+        }
+    }
+
+    return UCC_OK;
+err:
+    ucc_free(framework->components);
+    return status;
 }
 
 ucc_component_iface_t* ucc_get_component(ucc_component_framework_t *framework,
@@ -152,4 +311,34 @@ ucc_component_iface_t* ucc_get_component(ucc_component_framework_t *framework,
         }
     }
     return NULL;
+}
+
+char* ucc_get_framework_components_list(ucc_component_framework_t *framework,
+                                        const char* delimiter)
+{
+    char  *list = NULL;
+    size_t len  = 0;
+    int    i;
+
+    for (i = 0; i < framework->n_components; i++) {
+        /* component name + ',' delimiter */
+        len += strlen(framework->components[i]->name) + 1;
+    }
+    if (len) {
+        list = ucc_malloc(len + 1, "components_list");
+        if (!list) {
+            ucc_error("failed to allocate %zd bytes for components_list", len);
+            return NULL;
+        }
+        list[0] = '\0';
+        for (i = 0; i < framework->n_components; i++) {
+            strncat(list, framework->components[i]->name, len);
+            len -= strlen(framework->components[i]->name);
+            if (i < framework->n_components - 1) {
+                strncat(list, delimiter, len);
+                len -= strlen(delimiter);
+            }
+        }
+    }
+    return list;
 }

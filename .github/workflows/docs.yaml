@@ -1,0 +1,28 @@
+name: Docs
+
+on: [push, pull_request]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends doxygen doxygen-latex cm-super texlive-fonts-recommended
+    - uses: actions/checkout@v6
+    - name: Build UCC docs
+      run: |
+        ./autogen.sh
+        ./configure --with-docs-only
+        make docs
+    - name: Upload docs
+      uses: actions/upload-artifact@v7
+      with:
+        name: docs
+        path: ${{ github.workspace }}/docs/doxygen-doc/ucc.pdf
+        retention-days: 7

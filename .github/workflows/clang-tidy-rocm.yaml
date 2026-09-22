@@ -1,0 +1,78 @@
+name: Lint (ROCm)
+
+on: [push, pull_request]
+
+concurrency:
+  group: lint-rocm-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  OPEN_UCX_LINK: https://github.com/openucx/ucx
+  OPEN_UCX_BRANCH: master
+  CLANG_VER: 17
+  ROCM_VER: 5.6.1
+  LIBRARY_PATH: /tmp/ucx/install/lib
+  LD_LIBRARY_PATH: /tmp/ucx/install/lib
+jobs:
+  clang-tidy:
+    runs-on: ubuntu-22.04
+    name: clang-tidy (ROCm)
+    steps:
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        # Install basic dependencies
+        sudo apt-get install -y --no-install-recommends wget gpg
+        # Setup LLVM repository
+        sudo mkdir -p /etc/apt/keyrings
+        wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/llvm.gpg
+        echo "deb [signed-by=/etc/apt/keyrings/llvm.gpg] http://apt.llvm.org/jammy/ llvm-toolchain-jammy-${CLANG_VER} main" | sudo tee /etc/apt/sources.list.d/llvm.list
+        # Setup ROCm repository
+        wget https://repo.radeon.com/rocm/rocm.gpg.key -O - | sudo gpg --dearmor -o /etc/apt/keyrings/rocm.gpg
+        echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/${ROCM_VER} jammy main" | sudo tee /etc/apt/sources.list.d/rocm.list
+        echo -e 'Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 600' | sudo tee /etc/apt/preferences.d/rocm-pin-600
+        # Update PATH for ROCm
+        echo 'export PATH=$PATH:/opt/rocm/bin:/opt/rocm/llvm/bin' | sudo tee -a /etc/profile.d/rocm.sh
+        source /etc/profile.d/rocm.sh
+        # Install all required packages
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          clang-tidy-${CLANG_VER} \
+          bear \
+          rocm-hip-sdk
+        sudo ln -sf /opt/rocm-${ROCM_VER} /opt/rocm
+    - name: Resolve UCX HEAD commit
+      id: ucx-sha
+      run: echo "sha=$(git ls-remote ${OPEN_UCX_LINK} refs/heads/${OPEN_UCX_BRANCH} | cut -f1)" >> $GITHUB_OUTPUT
+    - name: Cache UCX
+      id: cache-ucx
+      uses: actions/cache@v4
+      with:
+        path: /tmp/ucx/install
+        key: ucx-rocm-${{ steps.ucx-sha.outputs.sha }}-${{ env.ROCM_VER }}-${{ hashFiles('.github/workflows/clang-tidy-rocm.yaml') }}
+    - name: Get UCX
+      if: steps.cache-ucx.outputs.cache-hit != 'true'
+      run: |
+        rm -rf /tmp/ucx
+        git clone --depth 1 ${OPEN_UCX_LINK} -b ${OPEN_UCX_BRANCH} /tmp/ucx
+    - name: Build UCX
+      if: steps.cache-ucx.outputs.cache-hit != 'true'
+      run: |
+        cd /tmp/ucx && ./autogen.sh
+        CC=gcc CXX=g++ ./contrib/configure-release --without-java --without-go --disable-numa --prefix $PWD/install --with-rocm=/opt/rocm
+        make -j install
+    - uses: actions/checkout@v6
+    - name: Build UCC
+      run: |
+        ./autogen.sh
+        CC=clang-${CLANG_VER} CXX=clang++-${CLANG_VER} ./configure --prefix=/tmp/ucc/install --with-ucx=/tmp/ucx/install --with-rocm=/opt/rocm --with-rccl=/opt/rocm --enable-assert
+        bear --output /tmp/compile_commands.json -- make -j
+    - name: Run clang-tidy
+      run: |
+        echo "Workspace: ${GITHUB_WORKSPACE}"
+        cd ${GITHUB_WORKSPACE}
+        run-clang-tidy-${CLANG_VER} -p /tmp/ -header-filter='^(?!.*(${GITHUB_WORKSPACE}/src/components/ec/rocm/kernel/.*|${GITHUB_WORKSPACE}/src/components/mc/rocm/kernel/.*)).*$' "^(?!.*\.cu$).*$" 2>&1 | tee /tmp/clang_tidy.log
+        nerrors=$(grep 'error:' /tmp/clang_tidy.log | wc -l)
+        if [ $nerrors -ne 0 ]; then
+            exit 125;
+        fi

@@ -1,5 +1,5 @@
 /**
- * Copyright (C) Mellanox Technologies Ltd. 2020-2021.  ALL RIGHTS RESERVED.
+ * Copyright (c) 2020-2021, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See file LICENSE for terms.
  */
@@ -10,7 +10,7 @@
 #include "utils/ucc_log.h"
 
 #define ucc_log_component_mc(_mc, _level, fmt, ...)                      \
-    ucc_log_component(_level, ((_mc)->config)->log_component,            \
+    ucc_log_component(_level, &((_mc)->config)->log_component,           \
                       fmt, ##__VA_ARGS__)
 
 #define mc_error(_mc, _fmt, ...)                                         \
